@@ -71,7 +71,6 @@ A full run takes ~10–15 minutes: ~75s to fetch all markets, then ~9 min to PAT
 ```
 ProbabilityCup/
 ├── .env                      # API keys (gitignored)
-├── .env.example              # Template — copy this and fill in keys
 ├── requirements.txt
 ├── scheduler.py              # APScheduler — runs every 2 hours
 ├── bot/
