@@ -51,8 +51,38 @@ PENALTY_OR_RED_RATE = 0.40     # P(penalty OR red card)
 
 TEAM_SHOTS_PER_GAME = 13.0
 TEAM_SHOTS_ON_TARGET_PER_GAME = 4.5
-MARKET_ALPHA = 0.70
+
+# Weight on the (sharp) betting-market line when blending with the model.
+# Sharp books are sharper than the forecasting crowd, so on odds-anchored
+# markets we ride the market hard and add only a little model.
+MARKET_ALPHA = 0.88
 DEFAULT_PROB = 0.50
+
+# --- Confidence shrinkage for signal-less peripheral markets ----------------
+# We can't see the crowd before submitting, so on markets where the model has
+# weak/no real edge we shrink predictions toward 50 to avoid confident
+# wrong-side bets, which the Brier rule punishes hard. SHRINK is the fraction
+# of the model's deviation from 0.50 that we KEEP (0 = always 50, 1 = none).
+#
+# Only markets that are genuinely near coin-flip with a WEAK heuristic lean go
+# here. Excluded on purpose:
+#   - penalty_awarded / penalty_or_red_card: calibrated base rates that sit far
+#     from 50 for real reasons (0.26 / 0.40) — shrinking would corrupt them.
+#   - team_first_goal: derived from market xG (a real anchored signal).
+#   - scoring / totals / match_winner: odds-anchored, keep full sharpness.
+PERIPHERAL_SHRINK = 0.35
+PERIPHERAL_TYPES = {
+    "team_corners",
+    "team_offsides",
+    "team_cards",
+    "total_cards",
+    "team_more_than_opponent",
+}
+
+
+def _shrink_to_half(prob, keep):
+    """Pull a probability toward 0.50, keeping `keep` of its deviation."""
+    return 0.50 + (prob - 0.50) * keep
 
 
 def _match_name(market):
@@ -285,6 +315,10 @@ def _comparative_with_supremacy(odds, match_name, parsed, base_mu, favor_underdo
 
 def run_model_on_market(market, odds_index):
     prob = _model_prob_for_market(market, odds_index)
+    # Shrink signal-less peripheral markets toward 50 to limit Brier downside.
+    qtype = parse_question(market.get("question", "")).get("type")
+    if qtype in PERIPHERAL_TYPES:
+        prob = _shrink_to_half(prob, PERIPHERAL_SHRINK)
     return format_prediction_for_submission(prob)
 
 

@@ -60,6 +60,10 @@ python3 -u -m bot.submit
 
 # Continuous scheduler (runs every 2 hours)
 python3 scheduler.py
+
+# Standalone probability checks (uses cached odds, no network calls)
+python3 check_probs2.py
+python3 -m tests.test_uzb_col
 ```
 
 A full run takes ~10–15 minutes: ~75s to fetch all markets, then ~9 min to PATCH ~495 predictions at the rate-limited pace. 429s are automatically retried — the run is self-healing.
@@ -73,6 +77,8 @@ ProbabilityCup/
 ├── .env                      # API keys (gitignored)
 ├── requirements.txt
 ├── scheduler.py              # APScheduler — runs every 2 hours
+├── check_probs.py            # Quick probability lookup locally
+├── check_probs2.py           # Standalone offline probability checker
 ├── bot/
 │   ├── client.py             # SportsPredict API client (TokenBucket + retry)
 │   ├── rate_limiter.py       # Central TokenBucket rate limiter
@@ -89,7 +95,9 @@ ProbabilityCup/
 │   ├── elo.py                # Elo rating system (available, not yet wired)
 │   └── ensemble.py           # Blends market odds + model, formats to 1–99
 └── tests/
-    └── test_model.py         # Unit tests
+    ├── test_model.py         # Unit tests
+    ├── test_rate_limiter.py  # Tests for token bucket
+    └── test_uzb_col.py       # Offline probability report for UZB vs COL
 ```
 
 ---
