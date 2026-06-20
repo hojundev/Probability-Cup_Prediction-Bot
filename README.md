@@ -2,7 +2,7 @@
 
 An automated forecasting bot for the [Jump Trading Probability Cup 2026](https://sportspredict.com) — a free-to-play forecasting contest during the 2026 FIFA World Cup (June 11 – July 19, 2026).
 
-The bot ingests live betting odds and player stats, runs a blended statistical model, and submits calibrated probability predictions (1–99) across ~495 binary yes/no markets on the SportsPredict platform. Scored by **Relative Brier Points** — the goal is calibration, not just picking winners.
+The bot ingests live betting odds and player stats, runs a blended statistical model, and submits calibrated probability predictions (1–99) across ~485 binary yes/no markets on the SportsPredict platform. Scored by **Relative Brier Points** — the goal is calibration, not just picking winners.
 
 ---
 
@@ -11,19 +11,21 @@ The bot ingests live betting odds and player stats, runs a blended statistical m
 ```
 Betting odds (The Odds API)
 Player stats (api-football)        →  Poisson/Dixon-Coles model
-                                   →  Blend (70% market / 30% model)
+                                   →  Blend (88% market / 12% model)
 SportsPredict markets              →  Question parser
                                    →  Calibrated integer (1–99)
+                                   →  Shrinkage on peripheral markets
                                    →  PATCH/POST via SportsPredict API
 ```
 
 Each run:
 1. Discovers the Probability Cup event, joins the lobby
-2. Fetches all 50 matches and their open markets (~485 total)
+2. Fetches all 49 matches and their open markets (~485 total)
 3. Fetches live betting odds (cached 2h to preserve quota)
 4. Routes each market question to the right model output
-5. PATCHes existing predictions / POSTs new ones
-6. All requests paced by a central token bucket (≤55 req/min) to stay within the SportsPredict 60/min rate limit
+5. Applies shrinkage toward 50 for signal-less peripheral markets
+6. PATCHes existing predictions / POSTs new ones
+7. All requests paced by a central token bucket (≤55 req/min) — 429s auto-retry
 
 ---
 
@@ -61,12 +63,16 @@ python3 -u -m bot.submit
 # Continuous scheduler (runs every 2 hours)
 python3 scheduler.py
 
-# Standalone probability checks (uses cached odds, no network calls)
-python3 check_probs2.py
-python3 -m tests.test_uzb_col
+# Look up questions + probabilities for a specific match
+python3 lookup.py GER CIV
+python3 lookup.py BRA Haiti
+python3 lookup.py TUR PAR
+
+# List all match names (to find the right codes)
+python3 lookup.py
 ```
 
-A full run takes ~10–15 minutes: ~75s to fetch all markets, then ~9 min to PATCH ~495 predictions at the rate-limited pace. 429s are automatically retried — the run is self-healing.
+A full run takes ~10–15 minutes: fetching markets + PATCHing ~485 predictions at the rate-limited pace. 429s are automatically retried — the run is self-healing and will never crash from throttling.
 
 ---
 
@@ -75,10 +81,10 @@ A full run takes ~10–15 minutes: ~75s to fetch all markets, then ~9 min to PAT
 ```
 ProbabilityCup/
 ├── .env                      # API keys (gitignored)
+├── .env.example              # Template — copy this and fill in keys
 ├── requirements.txt
 ├── scheduler.py              # APScheduler — runs every 2 hours
-├── check_probs.py            # Quick probability lookup locally
-├── check_probs2.py           # Standalone offline probability checker
+├── lookup.py                 # CLI tool: python3 lookup.py TEAM1 TEAM2
 ├── bot/
 │   ├── client.py             # SportsPredict API client (TokenBucket + retry)
 │   ├── rate_limiter.py       # Central TokenBucket rate limiter
@@ -95,17 +101,28 @@ ProbabilityCup/
 │   ├── elo.py                # Elo rating system (available, not yet wired)
 │   └── ensemble.py           # Blends market odds + model, formats to 1–99
 └── tests/
-    ├── test_model.py         # Unit tests
-    ├── test_rate_limiter.py  # Tests for token bucket
-    └── test_uzb_col.py       # Offline probability report for UZB vs COL
+    └── test_model.py         # Unit tests
 ```
+
+---
+
+## Match Name Reference
+
+The API uses FIFA 3-letter codes for most teams, but a few use full names:
+
+| Full name | API name |
+|-----------|----------|
+| Haiti | `Haiti` |
+| Curacao | `Curacao` |
+| New Zealand | `New Zealand` |
+| All others | 3-letter FIFA code (`BRA`, `GER`, `FRA`, etc.) |
 
 ---
 
 ## Model Details
 
 ### Scoring
-`RBP = (crowd_brier − your_brier) × 100` with stage multipliers (group 1×, knockout 2×, final 3×). Calibration beats overconfidence — the bot aims to be right about uncertainty, not just about outcomes.
+`RBP = (crowd_brier − your_brier) × 100` with stage multipliers (group 1×, knockout 2×, final 3×). Calibration beats overconfidence.
 
 ### Question types covered (~97% of markets)
 `match_winner`, `team_score`, `team_score_half`, `team_first_goal`, `total_goals`, `half_total_goals`, `btts_and_total_goals`, `halftime_tied`, `halftime_winning`, `halftime_both_sot`, `player_shot_on_target`, `player_goal_involvement`, `team_total_sot`, `total_sot`, `team_corners`, `team_offsides`, `team_cards`, `total_cards`, `team_more_than_opponent`, `penalty_awarded`, `penalty_or_red_card`
@@ -115,11 +132,20 @@ ProbabilityCup/
 2. Look up betting odds for the match (FIFA code resolution: `GHA` → `Ghana`)
 3. Estimate per-team xG from win probabilities + totals line
 4. Route to Poisson model / player stats / base-rate prior
-5. Blend with market odds: `0.70 × market + 0.30 × model`
-6. Clamp to integer 1–99
+5. Blend with market odds: `0.88 × market + 0.12 × model`
+6. Apply shrinkage toward 50 on peripheral markets (corners, cards, offsides, "more than opponent") — reduces Brier downside on signal-less markets
+7. Clamp to integer 1–99
+
+### Key tunable constants (`bot/submit.py`)
+
+| Constant | Value | Effect |
+|----------|-------|--------|
+| `MARKET_ALPHA` | `0.88` | Weight on sharp betting-market line vs model |
+| `PERIPHERAL_SHRINK` | `0.35` | How much peripheral market predictions keep their deviation from 50 (lower = closer to 50) |
+| `PERIPHERAL_TYPES` | corners, cards, offsides, total_cards, more_than_opponent | Which market types get shrinkage applied |
 
 ### Rate Limiting
-A central `TokenBucket` in `bot/rate_limiter.py` gates every SportsPredict API request. At 55 tokens/60s it self-corrects: calls proceed immediately when budget is available, block precisely when it isn't. 429 responses are auto-retried with a 62s wait — the run never crashes from throttling.
+A central `TokenBucket` in `bot/rate_limiter.py` gates every SportsPredict API request at 55 tokens/60s. 429 responses auto-retry with a 62s wait — the run never crashes from throttling.
 
 ---
 
@@ -141,3 +167,4 @@ A central `TokenBucket` in `bot/rate_limiter.py` gates every SportsPredict API r
 - ~97% of market questions parse to a real type (not "unknown")
 - Predictions span deciles 10–70 (properly calibrated, not all 50)
 - 485 predictions successfully PATCHed in a complete run (June 17, 2026)
+- 429s auto-retry — run is self-healing end to end
