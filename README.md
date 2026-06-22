@@ -120,6 +120,71 @@ competition-bot/
 
 ---
 
+## match-bot (Per-Match Prize Bot)
+
+A second bot aimed at **winning per-match leaderboard prizes** (top 1 of a single match's markets), not overall competition ranking. It runs as a separate entry under a second SportsPredict API key.
+
+It reuses the entire competition-bot pipeline (same model, same data, same client) and adds two things on top:
+
+1. **Selective extremizing** — pushes probabilities further from 50 via a logit stretch (`extremize(p, k)`) on markets with genuine signal.
+2. **Peripheral shrinkage removed** — competition-bot shrinks corners/cards/offsides toward 50 (`PERIPHERAL_SHRINK=0.35`); match-bot keeps the full model deviation (`PERIPHERAL_SHRINK=1.0`).
+
+The tradeoff: higher variance — wins bigger when right, loses bigger when wrong. Correct for a per-match prize hunt, wrong for overall calibration.
+
+### Setup
+
+Add a second SportsPredict key to the project `.env`:
+```
+SPORTSPREDICT_KEY_BOT2=sp_live_...
+```
+The bot refuses to run if this key is missing or identical to `SPORTSPREDICT_KEY`.
+
+### Running
+
+```bash
+# One-shot pass (from match-bot/)
+python match_bot.py
+
+# Continuous scheduler (full sweep every 2h, no lineup poll)
+python scheduler.py
+
+# Inspect what the match-bot submitted for a specific match
+python check_submissions.py "Argentina vs Austria"
+
+# Run tests
+python -m pytest tests/ -v
+```
+
+Note: the match-bot scheduler intentionally skips the lineup poll to avoid doubling api-football quota usage (100 req/day shared with competition-bot).
+
+### match-bot Structure
+
+```
+match-bot/
+├── extremize.py          # extremize(p, k) logit-stretch transform
+├── config.py             # EXTREMIZE_K, PERIPHERAL_SHRINK, EXTREMIZE_TYPES, TARGET_MATCH
+├── match_bot.py          # Wires competition-bot pipeline to second key + extremizer
+├── scheduler.py          # Full sweep every 2h (no lineup poll)
+├── check_submissions.py  # CLI: inspect match-bot predictions for a match
+├── requirements.txt      # Same as competition-bot + pytest + hypothesis
+└── tests/
+    ├── test_extremize.py  # Unit + property-based tests for the logit transform
+    └── test_match_bot.py  # Integration tests for the wrapper
+```
+
+### match-bot Tuning
+
+| Constant | Default | Effect |
+|----------|---------|--------|
+| `EXTREMIZE_K` | `1.75` | Logit stretch factor — higher = more aggressive / higher variance |
+| `PERIPHERAL_SHRINK` | `1.0` | Keep 100% of model's deviation from 50 (vs competition-bot's 0.35) |
+| `TARGET_MATCH` | `None` | Set to a match name (e.g. `"Ghana vs Panama"`) to submit only for that match |
+| `EXTREMIZE_TYPES` | 14 types | Market types that get pushed — player and penalty markets excluded (noisy) |
+
+Market types **not** extremized: `penalty_awarded`, `penalty_or_red_card`, `player_shot_on_target`, `player_goal_involvement`.
+
+---
+
 ## Match Name Reference
 
 The API uses FIFA 3-letter codes for most teams, but a few use full names:
