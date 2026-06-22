@@ -88,6 +88,26 @@ def halftime_outcome_probs(xg_home, xg_away, first_half_share=0.42, max_goals=8)
     return home_lead, tie, away_lead
 
 
+def prob_btts_and_over(xg_home, xg_away, threshold, max_goals=15):
+    """
+    Exact joint probability that BOTH teams score AND the total goals reach
+    `threshold` or more:
+
+        P(BTTS AND total >= threshold)
+          = Σ P(home=i) * P(away=j)   for all i>=1, j>=1, i+j>=threshold
+
+    This replaces the old `min(p_btts, p_total) * 0.85` heuristic with the true
+    bivariate-Poisson sum (assuming independence between the two teams' goals).
+    """
+    p = 0.0
+    for i in range(1, max_goals + 1):
+        pi = poisson.pmf(i, xg_home)
+        for j in range(1, max_goals + 1):
+            if i + j >= threshold:
+                p += pi * poisson.pmf(j, xg_away)
+    return float(p)
+
+
 def prob_x_greater_than_y(mu_x, mu_y, max_n=40):
     """
     P(X > Y) for two independent Poissons. Used for "Team A more <metric>

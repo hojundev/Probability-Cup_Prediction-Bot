@@ -72,11 +72,30 @@ def parse_question(question: str) -> dict:
         player = m.group(1).title() if m else "Unknown"
         return {"type": "player_goal_involvement", "player": player}
 
+    # "Will <player> score a goal (excluding own goals)?"
+    # The "(excluding own goals)" suffix is the reliable signal this is a
+    # player market, not a team-scoring market. Must come before team_score.
+    if "score a goal" in q and "excluding own goals" in q:
+        m = re.search(r"will\s+" + _TEAM_RE + r"\s+score a goal", q)
+        player = m.group(1).title() if m else "Unknown"
+        return {"type": "player_goal_involvement", "player": player}
+
     # "Will <player> have at least 1 shot on target [in the second half]?"
     if "shot on target" in q and ("have at least" in q or "have a shot" in q):
         m = re.search(r"will\s+" + _TEAM_RE + r"\s+have", q)
         player = m.group(1).title() if m else "Unknown"
         return {"type": "player_shot_on_target", "player": player, "half": _half(q)}
+
+    # ---- Half vs half goals comparison -------------------------------------
+    # "Will the second half have more goals than the first half?" (or reverse)
+    # This must come BEFORE the generic "more X than" comparative, which would
+    # otherwise misread the halves as two teams.
+    if "more goals than" in q and "first half" in q and "second half" in q:
+        m = re.search(
+            r"will the (first|second) half have more goals than the (first|second) half", q
+        )
+        if m and m.group(1) != m.group(2):
+            return {"type": "half_vs_half_goals", "more_half": m.group(1)}
 
     # ---- Comparative "more X than opponent" --------------------------------
     # "Will <team> have more shots on target than <opp> [in the second half]?"
@@ -151,14 +170,16 @@ def parse_question(question: str) -> dict:
         if n is not None:
             m = re.search(r"will\s+" + _TEAM_RE + r"\s+have", q)
             team = m.group(1).title() if m else "Unknown"
-            return {"type": "team_corners", "team": team, "threshold": n, "direction": direction}
+            return {"type": "team_corners", "team": team, "threshold": n,
+                    "direction": direction, "half": _half(q)}
 
     # "Will <team> be caught offside 2 or more times?"
     if "offside" in q:
         n, direction = _threshold(q)
         m = re.search(r"will\s+" + _TEAM_RE + r"\s+be caught offside", q)
         team = m.group(1).title() if m else "Unknown"
-        return {"type": "team_offsides", "team": team, "threshold": n or 2, "direction": direction or "over"}
+        return {"type": "team_offsides", "team": team, "threshold": n or 2,
+                "direction": direction or "over", "half": _half(q)}
 
     # "Will <team> receive at least 1 card in the second half?"
     if "card" in q and re.search(r"will\s+" + _TEAM_RE + r"\s+receive", q):

@@ -1,0 +1,9 @@
+# Match-bot reuses the competition-bot pipeline, so it shares the same runtime
+# dependencies. Tests additionally use pytest + hypothesis.
+requests
+scipy
+pandas
+apscheduler
+python-dotenv
+pytest
+hypothesis

@@ -2,7 +2,7 @@
 
 An automated forecasting bot for the [Jump Trading Probability Cup 2026](https://sportspredict.com) — a free-to-play forecasting contest during the 2026 FIFA World Cup (June 11 – July 19, 2026).
 
-The bot ingests live betting odds and player stats, runs a blended statistical model, and submits calibrated probability predictions (1–99) across ~485 binary yes/no markets on the SportsPredict platform. Scored by **Relative Brier Points** — the goal is calibration, not just picking winners.
+The bot ingests live betting odds, player stats, and confirmed lineups, runs a blended statistical model, and submits calibrated probability predictions (1–99) across ~485 binary yes/no markets on the SportsPredict platform. Scored by **Relative Brier Points** — the goal is calibration, not just picking winners.
 
 ---
 
@@ -11,21 +11,29 @@ The bot ingests live betting odds and player stats, runs a blended statistical m
 ```
 Betting odds (The Odds API)
 Player stats (api-football)        →  Poisson/Dixon-Coles model
-                                   →  Blend (88% market / 12% model)
+Elo ratings (WC 2026 priors)       →  Blend (88% market / 12% model)
+Confirmed lineups (api-football)   →  Shrinkage on peripheral markets
+                                   →  Lineup-triggered re-scoring
 SportsPredict markets              →  Question parser
                                    →  Calibrated integer (1–99)
-                                   →  Shrinkage on peripheral markets
                                    →  PATCH/POST via SportsPredict API
 ```
 
-Each run:
+Each full run:
 1. Discovers the Probability Cup event, joins the lobby
 2. Fetches all 49 matches and their open markets (~485 total)
 3. Fetches live betting odds (cached 2h to preserve quota)
 4. Routes each market question to the right model output
-5. Applies shrinkage toward 50 for signal-less peripheral markets
-6. PATCHes existing predictions / POSTs new ones
-7. All requests paced by a central token bucket (≤55 req/min) — 429s auto-retry
+5. Blends team xG with Elo-derived strength split
+6. Applies shrinkage toward 50 for signal-less peripheral markets
+7. PATCHes existing predictions / POSTs new ones
+8. All requests paced by a central token bucket (≤55 req/min) — 429s auto-retry
+
+A separate 15-minute lineup poll:
+- Resolves each upcoming match to an api-football fixture
+- Detects when confirmed starting XIs drop (90-min pre-kickoff window)
+- Re-runs the model for that match; slashes benched/absent player markets to 30%
+- Stops polling a match once its lineup is confirmed
 
 ---
 
@@ -60,7 +68,7 @@ python3 tests/test_model.py
 # One-shot run (submits/updates all open predictions)
 python3 -u -m bot.submit
 
-# Continuous scheduler (runs every 2 hours)
+# Continuous scheduler (full sweep every 2h, lineup poll every 15min)
 python3 scheduler.py
 
 # Look up questions + probabilities for a specific match
@@ -79,29 +87,35 @@ A full run takes ~10–15 minutes: fetching markets + PATCHing ~485 predictions 
 ## Project Structure
 
 ```
-ProbabilityCup/
+competition-bot/
 ├── .env                      # API keys (gitignored)
 ├── .env.example              # Template — copy this and fill in keys
 ├── requirements.txt
-├── scheduler.py              # APScheduler — runs every 2 hours
+├── scheduler.py              # APScheduler — full sweep every 2h, lineup poll every 15min
 ├── lookup.py                 # CLI tool: python3 lookup.py TEAM1 TEAM2
 ├── bot/
 │   ├── client.py             # SportsPredict API client (TokenBucket + retry)
 │   ├── rate_limiter.py       # Central TokenBucket rate limiter
 │   ├── question_parser.py    # Parses market questions into structured types
 │   ├── match_data.py         # Odds indexing, team-name resolution, xG estimation
-│   └── submit.py             # Main loop: fetch → model → PATCH/POST
+│   └── submit.py             # Main loop: fetch → model → PATCH/POST + lineup updates
 ├── data/
 │   ├── fetch_matches.py      # football-data.org fixtures
 │   ├── fetch_odds.py         # The Odds API (2-hour disk cache)
-│   └── fetch_player_stats.py # api-football player stats (disk cache)
+│   ├── fetch_player_stats.py # api-football player stats (permanent disk cache)
+│   ├── fetch_lineups.py      # api-football confirmed starting XIs
+│   ├── fetch_squads.py       # api-football squad lists
+│   ├── .odds_cache.json      # Cached odds (gitignored)
+│   └── .player_cache.json    # Cached player stats (gitignored)
 ├── model/
-│   ├── poisson.py            # Dixon-Coles Poisson model
+│   ├── poisson.py            # Dixon-Coles Poisson model + exact BTTS-and-over
 │   ├── player_model.py       # Player goal/shot/assist probabilities
-│   ├── elo.py                # Elo rating system (available, not yet wired)
+│   ├── elo.py                # Elo ratings — WC 2026 priors, wired into xG split
 │   └── ensemble.py           # Blends market odds + model, formats to 1–99
 └── tests/
-    └── test_model.py         # Unit tests
+    ├── test_model.py         # Core model unit tests
+    ├── test_rate_limiter.py  # TokenBucket tests
+    └── test_uzb_col.py       # Fixture-specific regression test
 ```
 
 ---
@@ -130,22 +144,27 @@ The API uses FIFA 3-letter codes for most teams, but a few use full names:
 ### Pipeline per market
 1. Parse question text → structured type + parameters
 2. Look up betting odds for the match (FIFA code resolution: `GHA` → `Ghana`)
-3. Estimate per-team xG from win probabilities + totals line
-4. Route to Poisson model / player stats / base-rate prior
-5. Blend with market odds: `0.88 × market + 0.12 × model`
-6. Apply shrinkage toward 50 on peripheral markets (corners, cards, offsides, "more than opponent") — reduces Brier downside on signal-less markets
-7. Clamp to integer 1–99
+3. Estimate total match xG from win probabilities + totals line
+4. Split xG by team using Elo ratings (total conserved exactly)
+5. Route to Poisson model / player stats / base-rate prior
+6. Blend: `0.88 × market + 0.12 × model`
+7. Apply shrinkage toward 50 on peripheral markets (corners, cards, offsides, "more than opponent")
+8. Clamp to integer 1–99
 
 ### Key tunable constants (`bot/submit.py`)
 
 | Constant | Value | Effect |
 |----------|-------|--------|
 | `MARKET_ALPHA` | `0.88` | Weight on sharp betting-market line vs model |
-| `PERIPHERAL_SHRINK` | `0.35` | How much peripheral market predictions keep their deviation from 50 (lower = closer to 50) |
-| `PERIPHERAL_TYPES` | corners, cards, offsides, total_cards, more_than_opponent | Which market types get shrinkage applied |
-
-### Rate Limiting
-A central `TokenBucket` in `bot/rate_limiter.py` gates every SportsPredict API request at 55 tokens/60s. 429 responses auto-retry with a 62s wait — the run never crashes from throttling.
+| `PERIPHERAL_SHRINK` | `0.35` | Fraction of deviation from 50 kept on peripheral markets (lower = closer to 50) |
+| `FIRST_HALF_GOAL_SHARE` | `0.42` | Share of goals expected in the first half |
+| `SOT_PER_XG` | `3.0` | Expected shots on target per expected goal |
+| `PENALTY_AWARDED_RATE` | `0.26` | P(≥1 penalty awarded in a match) |
+| `ELO_BLEND_WEIGHT` | `0.15` | Weight on Elo-derived xG split vs market-derived xG |
+| `MAX_PLAYER_REQUESTS_PER_RUN` | `20` | Cap on live api-football player lookups per run |
+| `BENCH_PLAYER_FACTOR` | `0.30` | Multiplier applied to player market prob when benched/absent |
+| `LINEUP_WINDOW_MINUTES` | `90` | Pre-kickoff window during which lineup polling is active |
+| `LINEUP_CHECK_INTERVAL_MINUTES` | `15` | Cadence of the lineup poll |
 
 ---
 
@@ -154,8 +173,8 @@ A central `TokenBucket` in `bot/rate_limiter.py` gates every SportsPredict API r
 | API | Budget | Strategy |
 |-----|--------|----------|
 | SportsPredict | 60 req/min rolling | Central token bucket (55/min) + unlimited 429 retry |
-| The Odds API | 500 req/month | 2-hour disk cache (`data/.odds_cache.json`) |
-| api-football | 100 req/day, 10 req/min | Permanent disk cache per player; miss caching; circuit breaker |
+| The Odds API | 500 req/month (resets July 1) | 2-hour disk cache (`data/.odds_cache.json`) |
+| api-football | 100 req/day, 10 req/min | Permanent disk cache per player; miss caching; circuit breaker; 20 live lookups/run cap |
 | football-data.org | 10 req/min | Rate-limit header inspection + 429 back-off |
 
 ---
@@ -168,3 +187,4 @@ A central `TokenBucket` in `bot/rate_limiter.py` gates every SportsPredict API r
 - Predictions span deciles 10–70 (properly calibrated, not all 50)
 - 485 predictions successfully PATCHed in a complete run (June 17, 2026)
 - 429s auto-retry — run is self-healing end to end
+- Lineup polling live in the scheduler (15-min cadence, 90-min pre-kickoff window)
