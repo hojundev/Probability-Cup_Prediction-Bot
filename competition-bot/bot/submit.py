@@ -51,7 +51,7 @@ AVG_OFFSIDES_PER_TEAM = 1.7
 AVG_CARDS_TOTAL = 4.2          # yellow + red, full match
 AVG_FOULS_PER_TEAM = 12.0
 PENALTY_AWARDED_RATE = 0.26    # P(>=1 penalty in a match)
-PENALTY_OR_RED_RATE = 0.40     # P(penalty OR red card)
+PENALTY_OR_RED_RATE = 0.37     # P(penalty OR red card)
 
 TEAM_SHOTS_PER_GAME = 13.0
 TEAM_SHOTS_ON_TARGET_PER_GAME = 4.5
@@ -85,6 +85,23 @@ MAX_PLAYER_REQUESTS_PER_RUN = 20
 # wildly wrong numbers like crediting a weak-team player with elite scoring.
 PLAYER_GOAL_INVOLVEMENT_BASE = 0.30   # P(goal or assist) for a generic featured player
 PLAYER_SOT_BASE = 0.45                # P(>=1 shot on target) for a generic featured player
+
+# --- Player market baseline blending ----------------------------------------
+# WC player markets resolve 0 (player didn't score/assist/get SOT) the vast
+# majority of the time, even for good players. The model's per-90 stats and
+# xG-based fallbacks tend to over-predict because they assume club-level
+# scoring rates in a tight tournament match. We blend the model output with a
+# conservative WC baseline to anchor predictions downward and beat the crowd
+# (which tends to cluster around 40%).
+#
+# final = PLAYER_BASELINE_WEIGHT * baseline + (1 - PLAYER_BASELINE_WEIGHT) * model_prob
+#
+# Tuning guide:
+#   - Increase PLAYER_BASELINE_WEIGHT to lean harder on the baseline (more conservative)
+#   - Decrease it to trust the model more (more differentiation between players)
+PLAYER_GOAL_INVOLVEMENT_BASELINE = 0.15   # conservative WC base rate for goal or assist
+PLAYER_SOT_BASELINE = 0.25                # conservative WC base rate for shot on target
+PLAYER_BASELINE_WEIGHT = 0.60             # fraction of final prob pulled from baseline
 
 # Player markets for absent/benched players are slashed to this fraction of the
 # starter probability once confirmed lineups are in (see lineup updates).
@@ -367,7 +384,10 @@ def _model_prob_for_market(market, odds_index):
             player_xsot = (team_xg * SOT_PER_XG) / TEAM_AVG_PLAYERS_SHOOTING
         if parsed.get("half"):
             player_xsot *= _half_share(parsed["half"])
-        return prob_at_least_one(player_xsot)
+        model_prob = prob_at_least_one(player_xsot)
+        # Blend with conservative WC baseline — model alone over-predicts because
+        # club per-90 stats don't translate directly to tight tournament matches.
+        return PLAYER_BASELINE_WEIGHT * PLAYER_SOT_BASELINE + (1 - PLAYER_BASELINE_WEIGHT) * model_prob
 
     # ---------- Player goal involvement (goal or assist) ----------
     if qtype == "player_goal_involvement":
@@ -386,7 +406,10 @@ def _model_prob_for_market(market, odds_index):
                 return _shrink_to_half(PLAYER_GOAL_INVOLVEMENT_BASE, 0.6)
             p_goal = prob_at_least_one(team_xg / TEAM_AVG_GOAL_SCORERS)
             p_assist = prob_at_least_one(team_xg * PLAYER_ASSIST_RATE)
-        return 1 - (1 - p_goal) * (1 - p_assist)
+        model_prob = 1 - (1 - p_goal) * (1 - p_assist)
+        # Blend with conservative WC baseline — model alone over-predicts because
+        # club per-90 stats don't translate directly to tight tournament matches.
+        return PLAYER_BASELINE_WEIGHT * PLAYER_GOAL_INVOLVEMENT_BASELINE + (1 - PLAYER_BASELINE_WEIGHT) * model_prob
 
     # ---------- Team total shots on target ----------
     if qtype == "team_total_sot":

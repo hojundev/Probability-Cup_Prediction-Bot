@@ -23,8 +23,6 @@ PERIPHERAL_SHRINK = 1.0
 # Deliberately EXCLUDED (left at the competition-bot value):
 #   - penalty_awarded / penalty_or_red_card: hardcoded base rates with no match
 #     signal. Extremizing a constant is meaningless.
-#   - player_shot_on_target / player_goal_involvement: noisy inputs (squad cache
-#     only covers WC 2022 teams). Extremizing noise amplifies errors.
 EXTREMIZE_TYPES = {
     "match_winner",
     "total_goals",
@@ -40,6 +38,8 @@ EXTREMIZE_TYPES = {
     "total_cards",
     "total_sot",
     "team_total_sot",
+    "player_shot_on_target",
+    "player_goal_involvement",
 }
 
 # When set to a SportsPredict match name (e.g. "Ghana vs Panama"), the bot only
