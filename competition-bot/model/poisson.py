@@ -108,6 +108,23 @@ def prob_btts_and_over(xg_home, xg_away, threshold, max_goals=15):
     return float(p)
 
 
+def prob_win_by_margin(xg_team, xg_opp, margin, max_goals=12):
+    """
+    P(team wins by `margin` or more goals) for two independent Poissons:
+
+        P(team - opp >= margin) = Σ P(team=i) * P(opp=j)   for all i - j >= margin
+
+    Used for "Team wins by 2 or more goals" knockout markets.
+    """
+    p = 0.0
+    for i in range(max_goals):
+        pi = poisson.pmf(i, xg_team)
+        for j in range(max_goals):
+            if i - j >= margin:
+                p += pi * poisson.pmf(j, xg_opp)
+    return float(p)
+
+
 def prob_x_greater_than_y(mu_x, mu_y, max_n=40):
     """
     P(X > Y) for two independent Poissons. Used for "Team A more <metric>

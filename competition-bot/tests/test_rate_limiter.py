@@ -137,17 +137,18 @@ class TestBlockingWhenEmpty:
         bucket.acquire()
         assert clock.now > t_before, "acquire should have advanced time when bucket was empty"
 
-    def test_acquire_waits_at_most_one_token_interval(self):
+    def test_acquire_after_burst_waits_one_full_window(self):
         """
-        After a full drain, the wait for one token is at most 1 / rate seconds
-        (one full token-refill period).
+        Sliding-window semantics: after a full-capacity burst at the same instant,
+        the next acquire must wait one full window for the oldest event to age out.
+        (A token bucket would wrongly let it through after only 1/rate seconds —
+        which is exactly how it could exceed a hard "N per window" limit.)
         """
         cap = 5
         refill = 10.0
         bucket, clock = make_bucket(capacity=cap, refill_seconds=refill)
-        rate = cap / refill  # tokens per second
 
-        # Drain.
+        # Drain a full window's worth of slots at t=0.
         for _ in range(cap):
             bucket.acquire()
 
@@ -155,72 +156,73 @@ class TestBlockingWhenEmpty:
         bucket.acquire()
         waited = clock.now - t_before
 
-        # One token takes 1/rate seconds to arrive; allow tiny float tolerance.
-        assert waited <= (1.0 / rate) + 1e-9
+        # The oldest event (t=0) ages out exactly `refill` seconds later.
+        assert abs(waited - refill) < 1e-9
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: refill timing
+# Unit tests: sliding-window timing
 # ---------------------------------------------------------------------------
 
-class TestRefillTiming:
-    def test_tokens_accumulate_over_time(self):
-        """Tokens refill at the expected rate."""
+class TestSlidingWindowTiming:
+    def test_no_slot_frees_before_window_elapses(self):
+        """A burst's slots stay occupied until a full window has elapsed."""
         cap = 10
-        refill = 10.0  # rate = 1 token/sec
+        refill = 10.0
         bucket, clock = make_bucket(capacity=cap, refill_seconds=refill)
-
-        # Drain all tokens.
         for _ in range(cap):
             bucket.acquire()
 
-        # Advance exactly 5 seconds — should have 5 tokens.
-        clock.advance(5.0)
-        bucket._refill()
-        assert abs(bucket._tokens - 5.0) < 1e-9
-
-    def test_tokens_do_not_exceed_capacity(self):
-        """Refill must not overfill beyond capacity."""
-        cap = 10
-        bucket, clock = make_bucket(capacity=cap, refill_seconds=10)
-
-        # Start full; advance a huge amount.
-        clock.advance(1_000_000)
-        bucket._refill()
-        assert bucket._tokens == cap
-
-    def test_partial_refill(self):
-        """Half the refill period restores half the capacity from empty."""
-        cap = 20
-        refill = 20.0  # rate = 1 token/sec
-        bucket, clock = make_bucket(capacity=cap, refill_seconds=refill)
-
-        # Drain.
-        for _ in range(cap):
-            bucket.acquire()
-
-        clock.advance(10.0)  # 10 seconds → 10 tokens
-        bucket._refill()
-        assert abs(bucket._tokens - 10.0) < 1e-9
-
-    def test_two_acquires_separated_by_one_interval(self):
-        """Acquiring, waiting one token's worth of time, then acquiring again."""
-        cap = 5
-        refill = 5.0  # rate = 1 token/sec; 1 token per second
-        bucket, clock = make_bucket(capacity=cap, refill_seconds=refill)
-
-        # Drain completely.
-        for _ in range(cap):
-            bucket.acquire()
-
-        # Advance exactly 1 second — exactly 1 token should have arrived.
-        clock.advance(1.0)
-
-        # The next acquire should succeed without extra sleep.
+        # Just before the window elapses the bucket is still full -> must block.
+        clock.advance(refill - 0.001)
         sleep = RecordingSleep(clock)
         bucket._sleep = sleep
         bucket.acquire()
-        assert sleep.total_slept == 0.0, "One token should have been ready after 1 s"
+        assert sleep.total_slept > 0.0
+
+    def test_all_slots_free_after_one_window(self):
+        """After a full window elapses, the whole t=0 burst has aged out."""
+        cap = 10
+        refill = 10.0
+        bucket, clock = make_bucket(capacity=cap, refill_seconds=refill)
+        for _ in range(cap):
+            bucket.acquire()
+
+        clock.advance(refill)  # the entire t=0 burst ages out
+        sleep = RecordingSleep(clock)
+        bucket._sleep = sleep
+        for _ in range(cap):
+            bucket.acquire()
+        assert sleep.total_slept == 0.0, "all slots should be free after one window"
+
+    def test_staggered_events_free_individually(self):
+        """A slot frees exactly `refill` seconds after the event that used it."""
+        cap = 2
+        refill = 10.0
+        bucket, clock = make_bucket(capacity=cap, refill_seconds=refill)
+        bucket.acquire()            # event at t=0
+        clock.advance(1.0)
+        bucket.acquire()            # event at t=1 -> now full
+
+        # The first slot (t=0) frees at t=10; from t=1 that is a 9 s wait.
+        t_before = clock.now
+        bucket.acquire()
+        assert abs((clock.now - t_before) - 9.0) < 1e-9
+
+    def test_fresh_burst_allowed_after_long_idle(self):
+        """A long idle empties the window, so a fresh full burst is immediate."""
+        cap = 8
+        refill = 10.0
+        bucket, clock = make_bucket(capacity=cap, refill_seconds=refill)
+        for _ in range(cap):
+            bucket.acquire()
+
+        clock.advance(1_000_000)   # everything ages out
+        sleep = RecordingSleep(clock)
+        bucket._sleep = sleep
+        for _ in range(cap):
+            bucket.acquire()
+        assert sleep.total_slept == 0.0
 
 
 # ---------------------------------------------------------------------------

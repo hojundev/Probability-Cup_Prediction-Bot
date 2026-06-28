@@ -27,7 +27,7 @@ Each full run:
 5. Blends team xG with Elo-derived strength split
 6. Applies shrinkage toward 50 for signal-less peripheral markets
 7. PATCHes existing predictions / POSTs new ones
-8. All requests paced by a central token bucket (≤55 req/min) — 429s auto-retry
+8. All requests paced by a central sliding-window limiter (≤55 req/60s, under the 60/min-per-IP cap) — 429s auto-retry
 
 A separate 15-minute lineup poll:
 - Resolves each upcoming match to an api-football fixture
@@ -78,6 +78,10 @@ python3 lookup.py TUR PAR
 
 # List all match names (to find the right codes)
 python3 lookup.py
+
+# Diagnostics
+python3 dump_questions.py          # every open question + its parsed type; flags any "unknown"
+python3 player_coverage.py         # which players in open markets have real stats vs fallback
 ```
 
 A full run takes ~10–15 minutes: fetching markets + PATCHing ~485 predictions at the rate-limited pace. 429s are automatically retried — the run is self-healing and will never crash from throttling.
@@ -93,9 +97,11 @@ competition-bot/
 ├── requirements.txt
 ├── scheduler.py              # APScheduler — full sweep every 2h, lineup poll every 15min
 ├── lookup.py                 # CLI tool: python3 lookup.py TEAM1 TEAM2
+├── dump_questions.py         # CLI: dump every open question + parsed type, flag "unknown"
+├── player_coverage.py        # CLI: report player-stat coverage (real / fallback / missing)
 ├── bot/
-│   ├── client.py             # SportsPredict API client (TokenBucket + retry)
-│   ├── rate_limiter.py       # Central TokenBucket rate limiter
+│   ├── client.py             # SportsPredict API client (rate limiter + retry)
+│   ├── rate_limiter.py       # Central sliding-window rate limiter (≤55 req/60s)
 │   ├── question_parser.py    # Parses market questions into structured types
 │   ├── match_data.py         # Odds indexing, team-name resolution, xG estimation
 │   └── submit.py             # Main loop: fetch → model → PATCH/POST + lineup updates
@@ -114,7 +120,8 @@ competition-bot/
 │   └── ensemble.py           # Blends market odds + model, formats to 1–99
 └── tests/
     ├── test_model.py         # Core model unit tests
-    ├── test_rate_limiter.py  # TokenBucket tests
+    ├── test_knockout.py       # Round-of-32 (knockout) question-parser routing
+    ├── test_rate_limiter.py  # Sliding-window limiter tests
     └── test_uzb_col.py       # Fixture-specific regression test
 ```
 
@@ -198,13 +205,29 @@ The API uses FIFA 3-letter codes for most teams, but a few use full names:
 
 ---
 
+## Knockout Rounds (Round of 32+)
+
+Knockout markets are phrased differently from the group stage, so the parser and model were extended to handle them:
+
+- **Scope suffix stripping** — knockout questions append `in regulation (90 minutes + stoppage time)` (and extra-time qualifiers). These are stripped up front so the group-stage patterns keep matching; the model already prices on a 90-minute basis.
+- **New question types** — `btts`, `team_goals_over` (scores N+), `team_score_both_halves`, `team_clean_sheet`, `match_draw` (regulation ends level), `team_advance` (to next round), `team_win_by_margin`, `total_shots`, `total_corners`, `total_offsides`, `both_teams_card`, `red_card`, `card_first_half`, `card_late`, `sub_scores`, `sub_before_half`, `any_player_sot`, `any_player_brace`, and four goal-timing markets (`goal_before_hydration`, `goal_after_hydration`, `goal_first_half_stoppage`, `goal_second_half_stoppage`).
+- **Mis-route fixes** — player shot-on-target markets tagged `(Country)` (e.g. "Messi (Argentina)") now route to the player model instead of `team_total_sot`; "there be N total corners/offsides" route to whole-match totals; "win by 2+ goals" routes to a margin model; "both teams receive a card" routes to a joint model. A `team_total_sot` subject that matches neither side of the match is re-priced as a player.
+- **`team_advance`** is derived from the market line as `P(win in regulation) + 0.5 × P(draw)` (a coin flip after extra time / penalties).
+- **Calibrated base rates** for markets with no xG signal (red card, substitutions, goal-timing windows, etc.) live as tunable constants in `submit.py` and are deliberately *not* shrunk toward 50.
+
+Run `python3 dump_questions.py` against a live round to confirm zero questions fall through to `unknown`.
+
+---
+
 ## Model Details
 
 ### Scoring
 `RBP = (crowd_brier − your_brier) × 100` with stage multipliers (group 1×, knockout 2×, final 3×). Calibration beats overconfidence.
 
-### Question types covered (~97% of markets)
-`match_winner`, `team_score`, `team_score_half`, `team_first_goal`, `total_goals`, `half_total_goals`, `btts_and_total_goals`, `halftime_tied`, `halftime_winning`, `halftime_both_sot`, `player_shot_on_target`, `player_goal_involvement`, `team_total_sot`, `total_sot`, `team_corners`, `team_offsides`, `team_cards`, `total_cards`, `team_more_than_opponent`, `penalty_awarded`, `penalty_or_red_card`
+### Question types covered (~100% of live markets)
+Group stage: `match_winner`, `team_score`, `team_score_half`, `team_first_goal`, `total_goals`, `half_total_goals`, `btts_and_total_goals`, `halftime_tied`, `halftime_winning`, `halftime_both_sot`, `player_shot_on_target`, `player_goal_involvement`, `team_total_sot`, `total_sot`, `team_corners`, `team_offsides`, `team_cards`, `total_cards`, `team_more_than_opponent`, `penalty_awarded`, `penalty_or_red_card`
+
+Knockout adds: `btts`, `team_goals_over`, `team_score_both_halves`, `team_clean_sheet`, `match_draw`, `team_advance`, `team_win_by_margin`, `total_shots`, `total_corners`, `total_offsides`, `both_teams_card`, `red_card`, `card_first_half`, `card_late`, `sub_scores`, `sub_before_half`, `any_player_sot`, `any_player_brace`, `goal_before_hydration`, `goal_after_hydration`, `goal_first_half_stoppage`, `goal_second_half_stoppage` (see [Knockout Rounds](#knockout-rounds-round-of-32))
 
 ### Pipeline per market
 1. Parse question text → structured type + parameters
@@ -213,8 +236,10 @@ The API uses FIFA 3-letter codes for most teams, but a few use full names:
 4. Split xG by team using Elo ratings (total conserved exactly)
 5. Route to Poisson model / player stats / base-rate prior
 6. Blend: `0.88 × market + 0.12 × model`
-7. Apply shrinkage toward 50 on peripheral markets (corners, cards, offsides, "more than opponent")
+7. Apply shrinkage toward 50 on peripheral markets (corners, cards, offsides, total corners/offsides, "more than opponent")
 8. Clamp to integer 1–99
+
+Team offsides additionally scale by attacking intent: `mu = AVG_OFFSIDES_PER_TEAM × (1 + OFFSIDE_XG_SCALE × (team_xg / AVG_TEAM_XG − 1))`, so high-xG sides are priced for more offside calls than low-xG sides.
 
 ### Key tunable constants (`bot/submit.py`)
 
@@ -226,10 +251,14 @@ The API uses FIFA 3-letter codes for most teams, but a few use full names:
 | `SOT_PER_XG` | `3.0` | Expected shots on target per expected goal |
 | `PENALTY_AWARDED_RATE` | `0.26` | P(≥1 penalty awarded in a match) |
 | `ELO_BLEND_WEIGHT` | `0.15` | Weight on Elo-derived xG split vs market-derived xG |
-| `MAX_PLAYER_REQUESTS_PER_RUN` | `20` | Cap on live api-football player lookups per run |
+| `AVG_TEAM_XG` | `1.3` | League-average team xG; baseline for xG-adjusted offsides |
+| `OFFSIDE_XG_SCALE` | `0.6` | How strongly team xG scales the offside rate (0 = flat, 1 = proportional) |
+| `MAX_PLAYER_REQUESTS_PER_RUN` | `20` | Cap on live api-football player lookups per run (cache hits are free — never throttled) |
 | `BENCH_PLAYER_FACTOR` | `0.30` | Multiplier applied to player market prob when benched/absent |
 | `LINEUP_WINDOW_MINUTES` | `90` | Pre-kickoff window during which lineup polling is active |
 | `LINEUP_CHECK_INTERVAL_MINUTES` | `15` | Cadence of the lineup poll |
+
+Knockout base-rate priors (also in `bot/submit.py`, deliberately not shrunk): `RED_CARD_RATE` (0.15), `SUB_SCORES_RATE` (0.18), `SUB_BEFORE_HALF_RATE` (0.16), `ANY_PLAYER_BRACE_RATE` (0.20), `ANY_PLAYER_MULTI_SOT_RATE` (0.88), `CARD_LATE_RATE` (0.65), plus the goal-timing window fractions. These are estimates — tune them as knockout results accrue.
 
 ---
 
@@ -237,19 +266,23 @@ The API uses FIFA 3-letter codes for most teams, but a few use full names:
 
 | API | Budget | Strategy |
 |-----|--------|----------|
-| SportsPredict | 60 req/min rolling | Central token bucket (55/min) + unlimited 429 retry |
+| SportsPredict | 60 req/min rolling (per IP) | Central sliding-window limiter (≤55 req/60s) + unlimited 429 retry |
 | The Odds API | 500 req/month (resets July 1) | 2-hour disk cache (`data/.odds_cache.json`) |
-| api-football | 100 req/day, 10 req/min | Permanent disk cache per player; miss caching; circuit breaker; 20 live lookups/run cap |
+| api-football | 100 req/day, 10 req/min | Permanent disk cache per player; miss caching; circuit breaker; 20 live lookups/run cap (cache hits never count) |
 | football-data.org | 10 req/min | Rate-limit header inspection + 429 back-off |
+
+> **Running both bots at once:** the SportsPredict limit is **per IP**, but each bot has its own limiter capped at 55/60s — so two bots on the same machine can hit ~110 req/min and trip 429s. Run their submissions sequentially, or lower each bot's capacity so the combined rate stays under 60/min.
 
 ---
 
 ## Known Good Facts
 
-- All unit tests pass
-- 50/50 matches resolve to betting odds (FIFA code + alias resolution)
-- ~97% of market questions parse to a real type (not "unknown")
+- All unit tests pass (`python3 -m pytest tests/`)
+- 50/50 group-stage matches resolve to betting odds (FIFA code + alias resolution)
+- ~100% of market questions parse to a real type — group stage and Round of 32 both verified zero `unknown` via `dump_questions.py`
 - Predictions span deciles 10–70 (properly calibrated, not all 50)
 - 485 predictions successfully PATCHed in a complete run (June 17, 2026)
 - 429s auto-retry — run is self-healing end to end
 - Lineup polling live in the scheduler (15-min cadence, 90-min pre-kickoff window)
+- Rate limiter is a sliding-window log: hard guarantee of ≤ capacity requests per 60s window (a token bucket could burst to ~2× and breach the 60/min-per-IP cap)
+- Player cache is hand-curated (api-football free tier returns no usable WC 2026 player data); the per-run lookup budget throttles only network calls, so curated entries are always used

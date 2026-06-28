@@ -1,26 +1,36 @@
 """
-Central token-bucket rate limiter for the SportsPredict API.
+Central rate limiter for the SportsPredict API.
 
-A continuous-refill bucket is used instead of fixed sleeps so every call site
-shares one budget and pacing self-corrects.  The default capacity is
-intentionally conservative (55 tokens per 60 s) to leave headroom for
-clock-skew and server-side counting differences.
+SportsPredict enforces a hard limit of 60 requests per minute per IP. A classic
+token bucket is the WRONG tool for a hard rolling-window limit: it allows a
+burst of `capacity` plus a full window of refills (~2*capacity) inside a single
+window, which would breach 60/min during a submission burst (200+ markets).
 
-clock and sleep are injectable so tests can run deterministically.
+So this is a sliding-window log limiter: it records the completion time of every
+acquire and guarantees that no more than `capacity` acquires complete in ANY
+rolling window of `refill_seconds`. The default (55 per 60 s) leaves headroom
+under the 60/min ceiling for clock skew and server-side counting differences.
+
+The class keeps the name `TokenBucket` for backwards compatibility with existing
+call sites. clock and sleep are injectable so tests run deterministically.
 """
 
 import time as _time
 import threading
+from collections import deque
 
 
 class TokenBucket:
     """
-    Thread-safe continuous-refill token bucket.
+    Thread-safe sliding-window rate limiter.
 
-    capacity      – maximum tokens (also the burst ceiling)
-    refill_seconds – window over which `capacity` tokens fully refill
-    clock         – callable returning monotonic time in seconds
-    sleep         – callable(seconds) used when blocking for a token
+    Invariant: at most `capacity` acquire() calls complete in any rolling window
+    of `refill_seconds` seconds.
+
+    capacity       – max completed acquires per window (also the burst ceiling)
+    refill_seconds – length of the rolling window
+    clock          – callable returning monotonic time in seconds
+    sleep          – callable(seconds) used when blocking for a free slot
     """
 
     def __init__(
@@ -31,29 +41,35 @@ class TokenBucket:
         clock=_time.monotonic,
         sleep=_time.sleep,
     ):
+        if capacity <= 0:
+            raise ValueError(f"capacity must be positive, got {capacity!r}")
+        if refill_seconds <= 0:
+            raise ValueError(f"refill_seconds must be positive, got {refill_seconds!r}")
         self._capacity = capacity
-        self._rate = capacity / refill_seconds      # tokens per second
-        self._tokens = capacity                     # start full
-        self._last = clock()
+        self._window = refill_seconds
         self._clock = clock
         self._sleep = sleep
         self._lock = threading.Lock()
+        # Completion timestamps still inside the current window, oldest first.
+        self._events = deque()
 
-    def _refill(self) -> None:
-        """Add tokens earned since the last call (called under lock)."""
-        now = self._clock()
-        elapsed = now - self._last
-        self._last = now
-        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+    def _evict(self, now) -> None:
+        """Drop timestamps that have aged out of the (now - window, now] window."""
+        cutoff = now - self._window
+        while self._events and self._events[0] <= cutoff:
+            self._events.popleft()
 
     def acquire(self) -> None:
-        """Block until one token is available, then consume it."""
+        """Block until a slot is free in the current window, then consume it."""
         while True:
             with self._lock:
-                self._refill()
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
+                now = self._clock()
+                self._evict(now)
+                if len(self._events) < self._capacity:
+                    self._events.append(now)
                     return
-                # Calculate exact wait for the next token
-                wait = (1.0 - self._tokens) / self._rate
-            self._sleep(wait)
+                # Full: wait until the oldest in-window event ages out, freeing
+                # a slot. After it expires, (now' - window) >= oldest so _evict
+                # will drop it on the next pass.
+                wait = self._events[0] + self._window - now
+            self._sleep(wait if wait > 0 else 0)

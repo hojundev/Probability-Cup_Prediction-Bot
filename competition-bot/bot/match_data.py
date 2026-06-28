@@ -87,7 +87,10 @@ def normalize_team_name(name: str) -> str:
     name = name.lower().strip()
     # Drop anything that isn't a letter, digit or space
     name = re.sub(r"[^a-z0-9 ]", "", name)
-    name = re.sub(r"\s+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    # Drop a leading article so "the Netherlands" == "Netherlands" and
+    # "the United States" resolves through the alias table to "usa".
+    name = re.sub(r"^the\s+", "", name)
     # Collapse known spelling variants to a single canonical key.
     return TEAM_ALIASES.get(name, name)
 

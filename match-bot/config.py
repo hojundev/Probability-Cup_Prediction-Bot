@@ -40,6 +40,14 @@ EXTREMIZE_TYPES = {
     "team_total_sot",
     "player_shot_on_target",
     "player_goal_involvement",
+    # --- Knockout (Round of 32+) markets with genuine xG-derived signal ---
+    "btts",
+    "team_goals_over",
+    "team_score_both_halves",
+    "team_clean_sheet",
+    "team_advance",
+    "team_win_by_margin",
+    "total_shots",
 }
 
 # When set to a SportsPredict match name (e.g. "Ghana vs Panama"), the bot only

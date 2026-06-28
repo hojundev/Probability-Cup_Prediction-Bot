@@ -20,7 +20,7 @@ from bot.match_data import (
     normalize_team_name,
 )
 from data.fetch_odds import fetch_market_odds
-from data.fetch_player_stats import fetch_player_stats
+from data.fetch_player_stats import fetch_player_stats, peek_cache
 from model.poisson import (
     predict_btts,
     prob_at_least_one,
@@ -29,6 +29,7 @@ from model.poisson import (
     prob_btts_and_over,
     halftime_outcome_probs,
     prob_x_greater_than_y,
+    prob_win_by_margin,
 )
 from model.ensemble import blend_probabilities, format_prediction_for_submission
 from model.elo import load_wc2026_ratings
@@ -49,6 +50,19 @@ MIN_TEAM_SOT = 2.5
 AVG_CORNERS_PER_TEAM = 5.0
 AVG_OFFSIDES_PER_TEAM = 1.7
 AVG_CARDS_TOTAL = 4.2          # yellow + red, full match
+
+# --- xG-adjusted offsides ---------------------------------------------------
+# A flat offside rate ignores playing style: attacking sides (high xG) push the
+# last line and get caught offside more often, while defensive sides (low xG)
+# get caught less. We scale the base offside rate by the team's xG relative to
+# an average team, blending so extreme xG values don't over-react.
+#
+#   xg_ratio = team_xg / AVG_TEAM_XG
+#   mu = AVG_OFFSIDES_PER_TEAM * (1 + OFFSIDE_XG_SCALE * (xg_ratio - 1))
+#
+# OFFSIDE_XG_SCALE = 0 ignores xG (flat fallback); 1 = full proportional scaling.
+AVG_TEAM_XG = 1.3              # average xG per team per match
+OFFSIDE_XG_SCALE = 0.6        # how strongly xG modulates the offside rate
 AVG_FOULS_PER_TEAM = 12.0
 PENALTY_AWARDED_RATE = 0.26    # P(>=1 penalty in a match)
 PENALTY_OR_RED_RATE = 0.37     # P(penalty OR red card)
@@ -107,6 +121,38 @@ PLAYER_BASELINE_WEIGHT = 0.60             # fraction of final prob pulled from b
 # starter probability once confirmed lineups are in (see lineup updates).
 BENCH_PLAYER_FACTOR = 0.30
 
+# --- Knockout / Round-of-32 market parameters -------------------------------
+# Knockout rounds add markets the group stage never had. The ones below are
+# either derived from xG (handled in the model) or priced from calibrated base
+# rates when no signal exists. These base rates are deliberately NOT 0.50 and
+# are NOT shrunk toward 50 (same reasoning as the penalty markets) — shrinking a
+# confident base rate would corrupt it. Tune as real knockout data accrues.
+RED_CARD_RATE = 0.15              # P(>=1 red card shown); consistent w/ PENALTY_OR_RED_RATE
+SUB_SCORES_RATE = 0.18            # P(a substitute scores)
+SUB_BEFORE_HALF_RATE = 0.16       # P(a substitution before halftime; usually injury)
+ANY_PLAYER_BRACE_RATE = 0.20      # P(some player scores 2+ goals)
+ANY_PLAYER_MULTI_SOT_RATE = 0.88  # P(some player records 2+ shots on target) — very common
+CARD_LATE_RATE = 0.65             # P(card after 2nd hydration break / late, incl. ET)
+CARD_FIRST_HALF_SHARE = 0.40      # share of a match's cards shown in the first half
+
+# Total shots (on + off target) in an average match; scaled by the match's
+# combined xG relative to an average game.
+TOTAL_SHOTS_BASELINE = 2 * TEAM_SHOTS_PER_GAME   # ~26 shots in an average match
+
+# Fraction of a match's total goals expected inside the specific time windows
+# the knockout markets ask about. Rough, but well above a coin flip.
+GOAL_FRAC_BEFORE_HYDRATION = 0.28        # before the ~30' first hydration break
+GOAL_FRAC_AFTER_HYDRATION = 0.22         # after the ~75' second hydration break
+GOAL_FRAC_FIRST_HALF_STOPPAGE = 0.05     # first-half added time
+GOAL_FRAC_SECOND_HALF_STOPPAGE = 0.09    # second-half added time
+# Fallback P(goal in window) when no odds/xG are available.
+GOAL_WINDOW_FALLBACK = {
+    "before_hydration": 0.45,
+    "after_hydration": 0.40,
+    "first_half_stoppage": 0.10,
+    "second_half_stoppage": 0.16,
+}
+
 # --- Lineup-update polling window -------------------------------------------
 # Start checking for confirmed lineups this many minutes before kickoff, and
 # poll on this interval until kickoff. Lineups are typically released ~60 min
@@ -132,6 +178,8 @@ PERIPHERAL_TYPES = {
     "team_offsides",
     "team_cards",
     "total_cards",
+    "total_corners",
+    "total_offsides",
     "team_more_than_opponent",
 }
 
@@ -160,6 +208,25 @@ def _team_xg_for(parsed, match_name, xg_home, xg_away):
         return None
     team = parsed.get("team", "")
     return xg_home if team_is_home(match_name, team) else xg_away
+
+
+def _team_side(match_name, team):
+    """
+    Return 'home', 'away', or None for `team` within `match_name`.
+
+    None means the name matches neither side — typically because it's actually a
+    player name (e.g. a knockout player market that lacked a "(Country)" tag and
+    fell into a team handler), which callers use to reroute appropriately.
+    """
+    home, away = split_match_name(match_name)
+    t = normalize_team_name(team)
+    if not t:
+        return None
+    if t == normalize_team_name(home):
+        return "home"
+    if t == normalize_team_name(away):
+        return "away"
+    return None
 
 
 def _player_team_xg(player_name, match_name, xg_home, xg_away):
@@ -222,21 +289,72 @@ def _real_player_stats(player_name):
     Return real per-90 stats for a player, or None when we should use an
     xG-based fallback instead. Returns None when:
       - the name is missing/unknown,
-      - the per-run lookup budget is exhausted,
+      - the player needs a live lookup but the per-run NETWORK budget is
+        exhausted (cached players are always served, free of budget),
       - api-football has no real data (is_real is False), or
       - the stats are present but effectively zero (below MIN_REAL_STAT).
+
+    The per-run budget only throttles actual api-football calls (cache misses),
+    NOT cache hits — so manually-curated entries are always used regardless of
+    how many player markets a run contains.
     """
     if not player_name or player_name == "Unknown":
         return None
-    key = player_name.strip().lower()
-    if key not in _player_request_names:
-        if len(_player_request_names) >= MAX_PLAYER_REQUESTS_PER_RUN:
-            return None
-        _player_request_names.add(key)
-    stats = fetch_player_stats(player_name)
+
+    cached = peek_cache(player_name)
+    if cached is None:
+        # Not cached -> a live api-football call is required; spend from the
+        # per-run network budget (and skip once it's exhausted).
+        key = player_name.strip().lower()
+        if key not in _player_request_names:
+            if len(_player_request_names) >= MAX_PLAYER_REQUESTS_PER_RUN:
+                return None
+            _player_request_names.add(key)
+        stats = fetch_player_stats(player_name)
+    else:
+        # Cache hit (manual real entry or a previously-cached miss): free.
+        stats = cached
+
     if not stats or not stats.get("is_real"):
         return None
     return stats
+
+
+def _player_sot_prob(player, threshold, half, match_name, xg_home, xg_away):
+    """
+    Probability a single player records `threshold`+ shots on target.
+
+    Shared by the `player_shot_on_target` handler and the `team_total_sot`
+    safety net (knockout player markets that lacked a "(Country)" tag and were
+    parsed as a team). Uses real per-90 stats when available, else prices off
+    the player's national-team xG, else a conservative shrunk base rate. The
+    model is blended toward a conservative WC baseline (club per-90 rates
+    over-predict in tight tournament matches), with the baseline scaled down for
+    multi-SOT thresholds.
+    """
+    threshold = threshold or 1
+    stats = _real_player_stats(player)
+    if stats and stats.get("shots_on_target_per_90", 0.0) >= MIN_REAL_STAT:
+        player_xsot = stats["shots_on_target_per_90"]
+    else:
+        team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
+        if team_xg is None:
+            # Team unidentifiable -> conservative base rate (shrunk to 50),
+            # scaled down for half-specific and multi-SOT questions.
+            base = PLAYER_SOT_BASE * (0.5 ** (threshold - 1))
+            if half:
+                base *= _half_share(half)
+            return _shrink_to_half(base, 0.6)
+        player_xsot = (team_xg * SOT_PER_XG) / TEAM_AVG_PLAYERS_SHOOTING
+    if half:
+        player_xsot *= _half_share(half)
+    if threshold <= 1:
+        model_prob = prob_at_least_one(player_xsot)
+        baseline = PLAYER_SOT_BASELINE
+    else:
+        model_prob = prob_over_under(player_xsot, threshold, "over")
+        baseline = PLAYER_SOT_BASELINE * (0.5 ** (threshold - 1))
+    return PLAYER_BASELINE_WEIGHT * baseline + (1 - PLAYER_BASELINE_WEIGHT) * model_prob
 
 
 def _model_prob_for_market(market, odds_index):
@@ -249,7 +367,7 @@ def _model_prob_for_market(market, odds_index):
     odds = find_match_odds(odds_index, match_name) if match_name else None
     xg_home = xg_away = None
     total_xg = None
-    p_home_sp = p_away_sp = None
+    p_home_sp = p_draw_sp = p_away_sp = None
     if odds:
         # Align the bookmaker home/away to the SportsPredict match ordering so
         # every team_is_home check downstream lines up with these values.
@@ -367,27 +485,10 @@ def _model_prob_for_market(market, odds_index):
 
     # ---------- Player shot on target ----------
     if qtype == "player_shot_on_target":
-        player = parsed.get("player", "")
-        stats = _real_player_stats(player)
-        if stats and stats.get("shots_on_target_per_90", 0.0) >= MIN_REAL_STAT:
-            player_xsot = stats["shots_on_target_per_90"]
-        else:
-            # No real stats: try to price off the player's actual team xG.
-            team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
-            if team_xg is None:
-                # Team unidentifiable -> conservative base rate (shrunk to 50),
-                # scaled down for half-specific questions.
-                base = PLAYER_SOT_BASE
-                if parsed.get("half"):
-                    base *= _half_share(parsed["half"])
-                return _shrink_to_half(base, 0.6)
-            player_xsot = (team_xg * SOT_PER_XG) / TEAM_AVG_PLAYERS_SHOOTING
-        if parsed.get("half"):
-            player_xsot *= _half_share(parsed["half"])
-        model_prob = prob_at_least_one(player_xsot)
-        # Blend with conservative WC baseline — model alone over-predicts because
-        # club per-90 stats don't translate directly to tight tournament matches.
-        return PLAYER_BASELINE_WEIGHT * PLAYER_SOT_BASELINE + (1 - PLAYER_BASELINE_WEIGHT) * model_prob
+        return _player_sot_prob(
+            parsed.get("player", ""), parsed.get("threshold"),
+            parsed.get("half"), match_name, xg_home, xg_away,
+        )
 
     # ---------- Player goal involvement (goal or assist) ----------
     if qtype == "player_goal_involvement":
@@ -413,6 +514,14 @@ def _model_prob_for_market(market, odds_index):
 
     # ---------- Team total shots on target ----------
     if qtype == "team_total_sot":
+        # Knockout player SOT markets ("<Player> have N or more shots on target")
+        # that lacked a "(Country)" tag land here. If the subject isn't one of the
+        # two teams, price it as a single player instead of a whole team.
+        if match_name and _team_side(match_name, parsed.get("team", "")) is None:
+            return _player_sot_prob(
+                parsed.get("team", ""), parsed.get("threshold"),
+                parsed.get("half"), match_name, xg_home, xg_away,
+            )
         team_xg = _team_xg_for(parsed, match_name, xg_home, xg_away)
         mu = max(MIN_TEAM_SOT, (team_xg if team_xg else 1.3) * SOT_PER_XG)
         if parsed.get("half"):
@@ -436,7 +545,15 @@ def _model_prob_for_market(market, odds_index):
 
     # ---------- Team offsides ----------
     if qtype == "team_offsides":
-        mu = AVG_OFFSIDES_PER_TEAM * (_half_share(parsed.get("half")) if parsed.get("half") else 1.0)
+        # Scale the base offside rate by the team's attacking intent (xG):
+        # attacking sides get caught offside more, defensive sides less. Falls
+        # back to the flat base rate when no odds/xG are available.
+        base_mu = AVG_OFFSIDES_PER_TEAM
+        team_xg = _team_xg_for(parsed, match_name, xg_home, xg_away)
+        if team_xg is not None:
+            xg_ratio = team_xg / AVG_TEAM_XG
+            base_mu = AVG_OFFSIDES_PER_TEAM * (1 + OFFSIDE_XG_SCALE * (xg_ratio - 1))
+        mu = base_mu * (_half_share(parsed.get("half")) if parsed.get("half") else 1.0)
         return prob_over_under(mu, parsed["threshold"], parsed["direction"])
 
     # ---------- Team cards ----------
@@ -471,6 +588,126 @@ def _model_prob_for_market(market, odds_index):
             base = AVG_FOULS_PER_TEAM if metric == "fouls" else AVG_CARDS_TOTAL / 2
             return _comparative_with_supremacy(odds, match_name, parsed, base, favor_underdog=True)
         return 0.42  # P(strictly more) with a meaningful tie probability
+
+    # ---------- Both teams to score (BTTS) ----------
+    if qtype == "btts":
+        if xg_home is not None:
+            return predict_btts(xg_home, xg_away)
+        return 0.50
+
+    # ---------- Team scores N+ goals ----------
+    if qtype == "team_goals_over":
+        team_xg = _team_xg_for(parsed, match_name, xg_home, xg_away)
+        if team_xg is not None:
+            return prob_over_under(team_xg, parsed["threshold"], parsed.get("direction", "over"))
+        # No xG: rough base rates by threshold.
+        return {2: 0.42, 3: 0.18, 4: 0.07}.get(parsed["threshold"], 0.30)
+
+    # ---------- Team scores in both halves ----------
+    if qtype == "team_score_both_halves":
+        team_xg = _team_xg_for(parsed, match_name, xg_home, xg_away)
+        if team_xg is not None:
+            p_first = prob_at_least_one(team_xg * FIRST_HALF_GOAL_SHARE)
+            p_second = prob_at_least_one(team_xg * SECOND_HALF_GOAL_SHARE)
+            return p_first * p_second
+        return 0.30
+
+    # ---------- Team keeps a clean sheet ----------
+    if qtype == "team_clean_sheet":
+        side = _team_side(match_name, parsed.get("team", ""))
+        if side is not None and xg_home is not None:
+            opp_xg = xg_away if side == "home" else xg_home
+            return 1 - prob_at_least_one(opp_xg)   # P(opponent scores 0)
+        return 0.30
+
+    # ---------- Regulation ends in a draw ----------
+    if qtype == "match_draw":
+        return p_draw_sp if odds else 0.25
+
+    # ---------- Advance to the next round ----------
+    if qtype == "team_advance":
+        if odds:
+            side = _team_side(match_name, parsed.get("team", ""))
+            p_win = p_home_sp if side == "home" else (p_away_sp if side == "away" else None)
+            if p_win is not None:
+                # Win in regulation, else ~coin flip after extra time / penalties.
+                return min(0.99, p_win + p_draw_sp * 0.5)
+        return DEFAULT_PROB
+
+    # ---------- Team wins by N+ goals ----------
+    if qtype == "team_win_by_margin":
+        side = _team_side(match_name, parsed.get("team", ""))
+        if side is not None and xg_home is not None:
+            team_xg = xg_home if side == "home" else xg_away
+            opp_xg = xg_away if side == "home" else xg_home
+            return prob_win_by_margin(team_xg, opp_xg, parsed.get("margin", 2))
+        return 0.20
+
+    # ---------- Total shots (on + off target) ----------
+    if qtype == "total_shots":
+        if total_xg is not None:
+            mu = TOTAL_SHOTS_BASELINE * (total_xg / (2 * AVG_TEAM_XG))
+        else:
+            mu = TOTAL_SHOTS_BASELINE
+        if parsed.get("half"):
+            mu *= _half_share(parsed["half"])
+        return prob_over_under(mu, parsed["threshold"], parsed["direction"])
+
+    # ---------- Total corners (both teams) ----------
+    if qtype == "total_corners":
+        mu = 2 * AVG_CORNERS_PER_TEAM * (_half_share(parsed.get("half")) if parsed.get("half") else 1.0)
+        return prob_over_under(mu, parsed["threshold"], parsed["direction"])
+
+    # ---------- Total offsides (both teams) ----------
+    if qtype == "total_offsides":
+        mu = 2 * AVG_OFFSIDES_PER_TEAM * (_half_share(parsed.get("half")) if parsed.get("half") else 1.0)
+        return prob_over_under(mu, parsed["threshold"], parsed["direction"])
+
+    # ---------- Both teams receive a card ----------
+    if qtype == "both_teams_card":
+        p_one = prob_at_least_one(AVG_CARDS_TOTAL / 2)
+        return p_one * p_one
+
+    # ---------- A card shown in the first half ----------
+    if qtype == "card_first_half":
+        return prob_at_least_one(AVG_CARDS_TOTAL * CARD_FIRST_HALF_SHARE)
+
+    # ---------- A card shown late (after the 2nd hydration break / incl. ET) ----------
+    if qtype == "card_late":
+        return CARD_LATE_RATE
+
+    # ---------- A red card shown ----------
+    if qtype == "red_card":
+        return RED_CARD_RATE
+
+    # ---------- A substitute scores ----------
+    if qtype == "sub_scores":
+        return SUB_SCORES_RATE
+
+    # ---------- A substitution before halftime ----------
+    if qtype == "sub_before_half":
+        return SUB_BEFORE_HALF_RATE
+
+    # ---------- Any player records 2+ shots on target ----------
+    if qtype == "any_player_sot":
+        return ANY_PLAYER_MULTI_SOT_RATE
+
+    # ---------- Any player scores 2+ goals (a brace) ----------
+    if qtype == "any_player_brace":
+        return ANY_PLAYER_BRACE_RATE
+
+    # ---------- Goal scored inside a specific time window ----------
+    if qtype in ("goal_before_hydration", "goal_after_hydration",
+                 "goal_first_half_stoppage", "goal_second_half_stoppage"):
+        frac = {
+            "goal_before_hydration": GOAL_FRAC_BEFORE_HYDRATION,
+            "goal_after_hydration": GOAL_FRAC_AFTER_HYDRATION,
+            "goal_first_half_stoppage": GOAL_FRAC_FIRST_HALF_STOPPAGE,
+            "goal_second_half_stoppage": GOAL_FRAC_SECOND_HALF_STOPPAGE,
+        }[qtype]
+        if total_xg is not None:
+            return prob_at_least_one(total_xg * frac)
+        return GOAL_WINDOW_FALLBACK[qtype.replace("goal_", "")]
 
     # ---------- Penalty markets ----------
     if qtype == "penalty_awarded":

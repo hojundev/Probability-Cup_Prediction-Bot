@@ -91,6 +91,15 @@ def _save_cache() -> None:
             print(f"[fetch_player_stats] Could not write cache: {exc}")
 
 
+def peek_cache(player_name: str):
+    """
+    Return the cached stats dict for a player WITHOUT any network call, or None
+    if the player isn't cached yet. Lets callers tell a cache hit (free, no
+    quota) from a player that would require a live lookup.
+    """
+    return _load_cache().get(_normalize(player_name))
+
+
 def _respect_rate_limits(resp: requests.Response) -> None:
     """Sleep if the per-minute window is nearly used up; trip breaker on daily."""
     global _api_disabled
