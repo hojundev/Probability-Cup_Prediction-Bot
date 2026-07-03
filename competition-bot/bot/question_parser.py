@@ -69,6 +69,51 @@ def _clean_player_name(raw):
     return name.title() if name else "Unknown"
 
 
+# Geographic qualifiers that appear as the FIRST word of national team names
+# but never as the first word of a player's given/surname. Used to distinguish
+# "DR Congo" (team) from "Yoane Wissa" (player) when there is no "(Country)" tag.
+_GEO_QUALIFIERS = frozenset({
+    "dr", "new", "south", "north", "united", "el", "trinidad",
+    "bosnia", "ivory", "cape", "saudi", "costa", "central",
+    "equatorial", "burkina", "sierra", "guinea",
+})
+
+
+def _looks_like_team(subject: str) -> bool:
+    """
+    Return True if `subject` looks like a national team name rather than a
+    player name. Used to avoid routing team-goal/SOT markets to player handlers.
+
+    Two signals:
+    1. The first word is a known geographic qualifier (DR, New, South, United,
+       …). Player names never start with these. Catches "DR Congo", "New
+       Zealand", "South Africa", etc.
+    2. The subject is a single word AND it normalizes to a known FIFA country
+       name. Catches "Spain", "Germany", "France", etc. — single-word team
+       names that don't have a geo-qualifier but are clearly not player surnames
+       when they appear as the sole subject of a "have N or more SOT" question.
+    """
+    if not subject:
+        return False
+    has_country_tag = bool(re.search(r"\([^)]+\)", subject))
+    if has_country_tag:
+        return False   # "(Country)" tag = definitively a player
+
+    from bot.match_data import normalize_team_name, FIFA_CODES
+    # Signal 1: the normalized subject exactly matches a known FIFA country name.
+    # normalize_team_name handles the leading "the", accents, and aliases, so
+    # "the United States" -> "usa", "Bosnia and Herzegovina" -> canonical, etc.
+    norm = normalize_team_name(subject)
+    known_countries = {normalize_team_name(v) for v in FIFA_CODES.values()}
+    if norm in known_countries:
+        return True
+    # Signal 2: first word is a geographic qualifier (covers any country not in
+    # FIFA_CODES, e.g. a team whose full name we don't have mapped).
+    if subject.strip().split()[0].lower() in _GEO_QUALIFIERS:
+        return True
+    return False
+
+
 def _strip_scope(q):
     """
     Remove knockout time-scope qualifiers that don't change how we model a market
@@ -116,12 +161,18 @@ def parse_question(question: str) -> dict:
     # "Will <player> score or assist a goal (excluding own goals)?"
     if "score or assist" in q:
         m = re.search(r"will\s+" + _TEAM_RE + r"\s+score or assist", q)
-        return {"type": "player_goal_involvement", "player": _clean_player_name(m.group(1) if m else "")}
+        subject = m.group(1) if m else ""
+        if not _looks_like_team(subject):
+            return {"type": "player_goal_involvement", "player": _clean_player_name(subject)}
+        # Subject is a team name -> fall through to team_score handler below.
 
     # "Will <player> score a goal (excluding own goals)?"  (not "any player")
     if "score a goal" in q and "excluding own goals" in q and "any player" not in q:
         m = re.search(r"will\s+" + _TEAM_RE + r"\s+score a goal", q)
-        return {"type": "player_goal_involvement", "player": _clean_player_name(m.group(1) if m else "")}
+        subject = m.group(1) if m else ""
+        if not _looks_like_team(subject):
+            return {"type": "player_goal_involvement", "player": _clean_player_name(subject)}
+        # Subject is a team name -> re-route as team_score below.
 
     # "Will any player score more than 1 goal (excluding own goals)?" (a brace)
     if "any player" in q and "score" in q and (
@@ -144,7 +195,9 @@ def parse_question(question: str) -> dict:
         m = re.search(r"will\s+" + _TEAM_RE + r"\s+have", q)
         subject = m.group(1) if m else ""
         has_country = bool(re.search(r"\([^)]+\)", subject))
-        if has_country or "at least" in q or "have a shot" in q:
+        # Route to player_shot_on_target only when we're confident the subject
+        # is a person, not a team. See _looks_like_team for the heuristic.
+        if has_country or (not _looks_like_team(subject) and ("at least" in q or "or more" in q or "have a shot" in q)):
             n, direction = _threshold(q)
             return {"type": "player_shot_on_target", "player": _clean_player_name(subject),
                     "threshold": n or 1, "direction": direction or "over", "half": _half(q)}

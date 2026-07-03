@@ -171,6 +171,14 @@ class SportsPredictClient:
         body, _ = self._request("GET", "/predictions", params=params)
         return body
 
+    def fetch_results(self, lobby_id: str | None = None):
+        """Settled predictions only — each includes probability_submitted + brier_score."""
+        params = {}
+        if lobby_id:
+            params["lobby_id"] = lobby_id
+        body, _ = self._request("GET", "/results", params=params)
+        return body
+
     def update_prediction(self, prediction_id: str, probability: int):
         body, _ = self._request(
             "PATCH", f"/predictions/{prediction_id}",
@@ -248,6 +256,9 @@ def fetch_markets(lobby_id, match_id):
 
 def fetch_my_predictions(lobby_id=None):
     return _client().fetch_my_predictions(lobby_id)
+
+def fetch_results(lobby_id=None):
+    return _client().fetch_results(lobby_id)
 
 def update_prediction(prediction_id, probability):
     return _client().update_prediction(prediction_id, probability)

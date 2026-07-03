@@ -97,9 +97,8 @@ def run_model_on_market(market, odds_index):
     Differences:
       - Peripheral markets keep PERIPHERAL_SHRINK (1.0 = full deviation) instead
         of the competition-bot's 0.35 shrink toward 50.
-      - Probabilities on EXTREMIZE_TYPES are pushed further from 0.50 via a
-        logit stretch (extremize). Other types are left exactly as the model
-        produced them.
+      - ALL market types are pushed further from 0.50 via a logit stretch
+        (extremize). No type gating — the match-bot bets on every signal it has.
     """
     qtype = parse_question(market.get("question", "")).get("type")
     prob = _model_prob_for_market(market, odds_index)
@@ -108,9 +107,8 @@ def run_model_on_market(market, odds_index):
     if qtype in PERIPHERAL_TYPES:
         prob = _shrink_to_half(prob, PERIPHERAL_SHRINK)
 
-    # Selective extremizing on markets with genuine signal.
-    if qtype in EXTREMIZE_TYPES:
-        prob = extremize(prob, EXTREMIZE_K)
+    # Extremize all types unconditionally.
+    prob = extremize(prob, EXTREMIZE_K)
 
     return format_prediction_for_submission(prob)
 

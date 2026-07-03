@@ -125,7 +125,10 @@ CASES = [
     ("goal_after_hydration", "Will a goal be scored after the second hydration break?"),
     ("half_vs_half_goals", "Will the second half produce more goals than the first half in regulation (90 minutes + stoppage time), excluding extra time?"),
     ("team_first_goal", "Will the Netherlands score the first goal of the match?"),
-    ("team_total_sot", "Will Brian Brobbey have 2 or more shots on target in regulation (90 minutes + stoppage time)?"),
+    # Brobbey is a Netherlands player, not a team -> player_shot_on_target.
+    # (Previously fell to team_total_sot and relied on the submit.py safety net;
+    # now routed directly since "N or more shots on target" + non-team subject.)
+    ("player_shot_on_target", "Will Brian Brobbey have 2 or more shots on target in regulation (90 minutes + stoppage time)?"),
     ("team_more_than_opponent", "Will the Netherlands have more corner kicks than Morocco in regulation (90 minutes + stoppage time)?"),
     ("match_winner", "Will the Netherlands win in regulation (90 minutes + stoppage time)?"),
     ("btts", "Will both teams score in regulation (90 minutes + stoppage time)?"),
