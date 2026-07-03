@@ -197,6 +197,23 @@ def fetch_player_stats(player_name: str) -> dict:
     key = _normalize(player_name)
 
     if key not in cache:
+        # Guard: silently skip obvious non-person strings that slip through
+        # due to parser mis-routes (team names, articles, common words).
+        _NON_PERSON_KEYS = {
+            "a substitute", "both teams", "dr congo", "haiti", "curacao",
+            "new zealand", "south africa", "ivory coast", "cape verde",
+            "burkina faso", "saudi arabia", "south korea", "north korea",
+            "costa rica", "el salvador", "trinidad and tobago",
+            "bosnia and herzegovina", "united states", "new caledonia",
+        }
+        if key in _NON_PERSON_KEYS:
+            import logging
+            logging.getLogger(__name__).warning(
+                "[fetch_player_stats] Blocked cache write for non-person key %r", key
+            )
+            result = FALLBACK_STATS.copy()
+            result["player_name"] = player_name
+            return result
         stats = _search_player(player_name)
         if stats is not None:
             # Real data found — cache it permanently.

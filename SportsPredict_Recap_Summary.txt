@@ -1,0 +1,46 @@
+SportsPredict Probability Cup Group Stage Recap - Summary
+
+OVERALL PERFORMANCE & CALIBRATION
+* Total Activity: You settled 491 forecasts during the group stage.
+* Overall Value: You earned +554 RBP against the field.
+* Forecast Calibration: Your actual hit rate effectively tracked your average predicted probability, demonstrating "elite calibration" where your confidence consistently matches reality.
+
+HIGHLIGHTS & KEY MOMENTS
+* Your Boldest Call: Predicting "YES" for Duckens Nazon to have at least 1 shot on target. You predicted 63% against the crowd's 28%, resulting in +41.3 RBP.
+* Your Toughest Break: Predicting "YES" for Ellyes Skhiri to have at least 1 shot on target. You predicted 71% against the crowd's 29%, but the result was "NO," costing you -38.7 RBP.
+* Your Best Match: Uruguay vs Spain, where you earned +77.3 RBP across 10 forecasts.
+* Your Roughest Match: Panama vs Croatia, where you lost -69.8 RBP across 10 forecasts.
+
+YOUR TOP 3 CATEGORIES
+Your most successful prediction categories where you found the most edge over the crowd:
+1. Total shots on target: Across 12 settled forecasts, you achieved an average RBP gap of +5.7 compared to the crowd. Your contrarian win rate was 0% (0 of 1 won), and your confidence bias was -15% (Timid).
+2. Team to score anytime: Across 12 settled forecasts, your average RBP gap to the crowd was +4.4. You had a 50% contrarian win rate (4 of 8 won) and a +0% (Optimal) confidence bias.
+3. Total goals (under): Across 13 settled forecasts, you secured an average RBP gap of +4.0. Your contrarian win rate was 60% (3 of 5 won), maintaining a +0% (Optimal) confidence bias.
+
+FULL CATEGORY BREAKDOWN
+Your RBP gap versus the crowd average across all categories with at least 10 settled forecasts:
+
+Category | Forecasts (N) | RBP vs. Crowd
+--------------------------------------------------
+Total shots on target | 12 | +5.7
+Team to score anytime | 12 | +4.4
+Total goals (under) | 13 | +4.0
+Player score or assist | 14 | +3.5
+Team corner comparisons | 16 | +3.1
+Team shots on target | 22 | +2.9
+BTTS + totals | 19 | +2.4
+Total cards | 13 | +2.0
+Penalty + red card | 23 | +1.8
+Match winners | 39 | +1.6
+Offsides | 42 | +1.4
+Team to score in 2nd half | 33 | +1.3
+Team SoT comparisons | 36 | +1.0
+Total goals (over) | 12 | +0.8
+Team foul comparisons | 39 | +0.5
+Player shots on target | 52 | +0.2
+Team card comparisons | 15 | -0.2
+Both teams shots on target | 12 | -2.4
+Team corners | 10 | -4.9
+
+WHERE TO LEAN IN NEXT
+* Team corners: This was your hardest category in Round 1. You slid -4.9 RBP below the crowd average across 10 forecasts, indicating it is worth a closer look before the knockouts begin.

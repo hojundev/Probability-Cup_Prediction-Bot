@@ -82,6 +82,8 @@ python3 lookup.py
 # Diagnostics
 python3 dump_questions.py          # every open question + its parsed type; flags any "unknown"
 python3 player_coverage.py         # which players in open markets have real stats vs fallback
+python3 calibration.py             # per-type calibration (prediction vs actual) from settled results
+python3 results.py Germany         # settled results (outcome + Brier) for a match/team
 ```
 
 A full run takes ~10–15 minutes: fetching markets + PATCHing ~485 predictions at the rate-limited pace. 429s are automatically retried — the run is self-healing and will never crash from throttling.
@@ -99,6 +101,8 @@ competition-bot/
 ├── lookup.py                 # CLI tool: python3 lookup.py TEAM1 TEAM2
 ├── dump_questions.py         # CLI: dump every open question + parsed type, flag "unknown"
 ├── player_coverage.py        # CLI: report player-stat coverage (real / fallback / missing)
+├── calibration.py            # CLI: per-type calibration report from settled results
+├── results.py                # CLI: settled results (outcome + Brier) for a match/team
 ├── bot/
 │   ├── client.py             # SportsPredict API client (rate limiter + retry)
 │   ├── rate_limiter.py       # Central sliding-window rate limiter (≤55 req/60s)
@@ -239,7 +243,18 @@ Knockout adds: `btts`, `team_goals_over`, `team_score_both_halves`, `team_clean_
 7. Apply shrinkage toward 50 on peripheral markets (corners, cards, offsides, total corners/offsides, "more than opponent")
 8. Clamp to integer 1–99
 
-Team offsides additionally scale by attacking intent: `mu = AVG_OFFSIDES_PER_TEAM × (1 + OFFSIDE_XG_SCALE × (team_xg / AVG_TEAM_XG − 1))`, so high-xG sides are priced for more offside calls than low-xG sides.
+Team offsides additionally scale by attacking intent: `mu = AVG_OFFSIDES_PER_TEAM × (1 + OFFSIDE_XG_SCALE × (team_xg / AVG_TEAM_XG − 1))`, so high-xG sides are priced for more offside calls than low-xG sides. **Corner counts** scale the same way (`CORNER_XG_SCALE`), with separate calibrated means for team vs total (`AVG_CORNERS_PER_TEAM` 5.5, `AVG_TOTAL_CORNERS` 9.0 — group-stage results showed team corners under-predicted and total corners over-predicted). `team_corners` also keeps more of its deviation (`PERIPHERAL_SHRINK_OVERRIDES` 0.65 vs the default 0.35) since it was hugging 50 from below; `total_corners` keeps the heavier default shrink.
+
+### Player markets
+`player_shot_on_target` and `player_goal_involvement` use the player's **own per-90 rate**, adjusted **only** by how strong their team is expected to be in the match — there is no pull toward a generic crowd baseline:
+
+```
+context     = clamp(team_xg / PLAYER_TEAM_XG_REF, FLOOR, CEIL)
+player_rate = own_per90_rate × context
+P(event)    = Poisson(player_rate)
+```
+
+So an elite striker on a strong team stays high (Kane ~88) while a good shooter on an underdog side is scaled down proportionally — driven by the favorite/underdog gap, not an arbitrary baseline. With no stats but a known team, the rate is derived from team xG; with neither, a fixed prior is used. `PLAYER_TEAM_XG_REF` is the single conservatism knob (raise it to pull everyone down).
 
 ### Key tunable constants (`bot/submit.py`)
 
@@ -251,12 +266,17 @@ Team offsides additionally scale by attacking intent: `mu = AVG_OFFSIDES_PER_TEA
 | `SOT_PER_XG` | `3.0` | Expected shots on target per expected goal |
 | `PENALTY_AWARDED_RATE` | `0.26` | P(≥1 penalty awarded in a match) |
 | `ELO_BLEND_WEIGHT` | `0.15` | Weight on Elo-derived xG split vs market-derived xG |
-| `AVG_TEAM_XG` | `1.3` | League-average team xG; baseline for xG-adjusted offsides |
+| `AVG_TEAM_XG` | `1.3` | League-average team xG; baseline for xG-adjusted offsides/corners |
 | `OFFSIDE_XG_SCALE` | `0.6` | How strongly team xG scales the offside rate (0 = flat, 1 = proportional) |
+| `CORNER_XG_SCALE` | `0.5` | How strongly team xG scales corner counts |
+| `PLAYER_TEAM_XG_REF` | `2.3` | Team xG at which a player realizes ~their full per-90 rate; weaker teams scale their players down (single player-conservatism knob) |
+| `PLAYER_TEAM_XG_CEIL` | `1.0` | Max team-performance multiplier for a player (1.0 = no upside boost) |
 | `MAX_PLAYER_REQUESTS_PER_RUN` | `20` | Cap on live api-football player lookups per run (cache hits are free — never throttled) |
 | `BENCH_PLAYER_FACTOR` | `0.30` | Multiplier applied to player market prob when benched/absent |
 | `LINEUP_WINDOW_MINUTES` | `90` | Pre-kickoff window during which lineup polling is active |
 | `LINEUP_CHECK_INTERVAL_MINUTES` | `15` | Cadence of the lineup poll |
+
+Peripheral markets are shrunk toward 50 by `PERIPHERAL_SHRINK` (0.35), except `team_corners`, which keeps 0.65 of its deviation via `PERIPHERAL_SHRINK_OVERRIDES` (it was under-predicted; `total_corners` keeps the default since it was over-predicted).
 
 Knockout base-rate priors (also in `bot/submit.py`, deliberately not shrunk): `RED_CARD_RATE` (0.15), `SUB_SCORES_RATE` (0.18), `SUB_BEFORE_HALF_RATE` (0.16), `ANY_PLAYER_BRACE_RATE` (0.20), `ANY_PLAYER_MULTI_SOT_RATE` (0.88), `CARD_LATE_RATE` (0.65), plus the goal-timing window fractions. These are estimates — tune them as knockout results accrue.
 

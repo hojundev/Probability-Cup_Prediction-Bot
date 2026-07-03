@@ -37,19 +37,32 @@ from model.elo import load_wc2026_ratings
 logger = logging.getLogger(__name__)
 
 # Share of goals scored in each half (World Cup historical split).
-FIRST_HALF_GOAL_SHARE = 0.42
-SECOND_HALF_GOAL_SHARE = 0.58
+FIRST_HALF_GOAL_SHARE = 0.43
+SECOND_HALF_GOAL_SHARE = 0.57
 
-# Convert a team's expected goals into expected shots on target. Empirically a
-# team puts roughly 3 shots on target per expected goal, with a floor.
-SOT_PER_XG = 3.0
+# Convert a team's expected goals into expected shots on target.
+# The ratio scales with team xG: dominant favorites take disproportionately more
+# shots per xG (lots of speculative attempts) than average/weak teams. So the
+# effective ratio rises above/below the base by how far the team's xG sits above
+# an average team, clamped to a sane range.
+#
+#   sot_per_xg(team_xg) = SOT_PER_XG_BASE * (1 + SOT_PER_XG_SLOPE * (team_xg/AVG_TEAM_XG - 1))
+#
+# At team_xg = AVG_TEAM_XG the ratio is exactly SOT_PER_XG_BASE (3.3, calibrated
+# from the ~4.3-SOT / ~1.3-xG match average).
+SOT_PER_XG = 3.3               # base ratio (kept for fallbacks that lack a team xG)
+SOT_PER_XG_BASE = 3.3
+SOT_PER_XG_SLOPE = 0.35        # how strongly the ratio rises with team dominance
+SOT_PER_XG_MIN = 2.9           # clamp: weak teams don't drop below this
+SOT_PER_XG_MAX = 4.2           # clamp: elite favorites don't exceed this
 MIN_TEAM_SOT = 2.5
 
 # Historical per-match base rates used as calibrated priors for peripheral
 # markets the bookmaker feed doesn't cover. These beat a naive 0.50.
-AVG_CORNERS_PER_TEAM = 5.0
+AVG_CORNERS_PER_TEAM = 5.5      # per team; calibrated up (team-corner overs were under-predicted)
+AVG_TOTAL_CORNERS = 9.0         # both teams; calibrated down (total-corner overs were over-predicted)
 AVG_OFFSIDES_PER_TEAM = 1.7
-AVG_CARDS_TOTAL = 4.2          # yellow + red, full match
+AVG_CARDS_TOTAL = 2.665        # yellow + red per match; 2026 WC actuals: 2.54Y + 0.125R
 
 # --- xG-adjusted offsides ---------------------------------------------------
 # A flat offside rate ignores playing style: attacking sides (high xG) push the
@@ -63,9 +76,10 @@ AVG_CARDS_TOTAL = 4.2          # yellow + red, full match
 # OFFSIDE_XG_SCALE = 0 ignores xG (flat fallback); 1 = full proportional scaling.
 AVG_TEAM_XG = 1.3              # average xG per team per match
 OFFSIDE_XG_SCALE = 0.6        # how strongly xG modulates the offside rate
+CORNER_XG_SCALE = 0.5         # how strongly xG modulates corner counts (attacking sides win more)
 AVG_FOULS_PER_TEAM = 12.0
 PENALTY_AWARDED_RATE = 0.26    # P(>=1 penalty in a match)
-PENALTY_OR_RED_RATE = 0.37     # P(penalty OR red card)
+PENALTY_OR_RED_RATE = 0.29     # P(penalty OR red card); calibrated down from group-stage results
 
 TEAM_SHOTS_PER_GAME = 13.0
 TEAM_SHOTS_ON_TARGET_PER_GAME = 4.5
@@ -100,22 +114,30 @@ MAX_PLAYER_REQUESTS_PER_RUN = 20
 PLAYER_GOAL_INVOLVEMENT_BASE = 0.30   # P(goal or assist) for a generic featured player
 PLAYER_SOT_BASE = 0.45                # P(>=1 shot on target) for a generic featured player
 
-# --- Player market baseline blending ----------------------------------------
-# WC player markets resolve 0 (player didn't score/assist/get SOT) the vast
-# majority of the time, even for good players. The model's per-90 stats and
-# xG-based fallbacks tend to over-predict because they assume club-level
-# scoring rates in a tight tournament match. We blend the model output with a
-# conservative WC baseline to anchor predictions downward and beat the crowd
-# (which tends to cluster around 40%).
+# --- Player market scaling --------------------------------------------------
+# A player's probability is their OWN per-90 rate (or a team-xG estimate when we
+# have no stats), adjusted ONLY by how strong their team is expected to be in
+# this match. No pull toward a generic crowd baseline.
 #
-# final = PLAYER_BASELINE_WEIGHT * baseline + (1 - PLAYER_BASELINE_WEIGHT) * model_prob
+# The adjustment is a single multiplier on the rate:
 #
-# Tuning guide:
-#   - Increase PLAYER_BASELINE_WEIGHT to lean harder on the baseline (more conservative)
-#   - Decrease it to trust the model more (more differentiation between players)
-PLAYER_GOAL_INVOLVEMENT_BASELINE = 0.15   # conservative WC base rate for goal or assist
-PLAYER_SOT_BASELINE = 0.25                # conservative WC base rate for shot on target
-PLAYER_BASELINE_WEIGHT = 0.60             # fraction of final prob pulled from baseline
+#   context = clamp(team_xg / PLAYER_TEAM_XG_REF, PLAYER_TEAM_XG_FLOOR, PLAYER_TEAM_XG_CEIL)
+#   player_rate = own_per90_rate * context
+#
+# PLAYER_TEAM_XG_REF is the team xG at which a player realizes ~their full rate;
+# weaker (underdog) teams scale their players down proportionally, stronger
+# teams sit near full. When the team/match xG can't be resolved (no odds, or the
+# player isn't in the squad cache) we assume an average team (AVG_TEAM_XG).
+#
+# Tuning:
+#   - PLAYER_TEAM_XG_REF: raise to make EVERY player more conservative (only the
+#     strongest teams' players approach their raw rate); lower to trust club
+#     rates more.
+#   - PLAYER_TEAM_XG_CEIL: max multiplier (1.0 = a strong-team player tops out at
+#     their raw rate, no upside boost).
+PLAYER_TEAM_XG_REF = 1.9      # team xG corresponding to ~full per-90 rate realization
+PLAYER_TEAM_XG_FLOOR = 0.20   # min context multiplier (don't zero out a star on a minnow)
+PLAYER_TEAM_XG_CEIL = 1.00    # max context multiplier (1.0 = no upside boost)
 
 # Player markets for absent/benched players are slashed to this fraction of the
 # starter probability once confirmed lineups are in (see lineup updates).
@@ -127,28 +149,38 @@ BENCH_PLAYER_FACTOR = 0.30
 # rates when no signal exists. These base rates are deliberately NOT 0.50 and
 # are NOT shrunk toward 50 (same reasoning as the penalty markets) — shrinking a
 # confident base rate would corrupt it. Tune as real knockout data accrues.
-RED_CARD_RATE = 0.15              # P(>=1 red card shown); consistent w/ PENALTY_OR_RED_RATE
+RED_CARD_RATE = 0.118             # P(>=1 red card); derived from 2026 WC avg 0.125 R/match
 SUB_SCORES_RATE = 0.18            # P(a substitute scores)
 SUB_BEFORE_HALF_RATE = 0.16       # P(a substitution before halftime; usually injury)
 ANY_PLAYER_BRACE_RATE = 0.20      # P(some player scores 2+ goals)
 ANY_PLAYER_MULTI_SOT_RATE = 0.88  # P(some player records 2+ shots on target) — very common
 CARD_LATE_RATE = 0.65             # P(card after 2nd hydration break / late, incl. ET)
-CARD_FIRST_HALF_SHARE = 0.40      # share of a match's cards shown in the first half
+CARD_FIRST_HALF_SHARE = 0.35      # share of a match's cards shown in the first half (WC: ~35%)
 
 # Total shots (on + off target) in an average match; scaled by the match's
 # combined xG relative to an average game.
 TOTAL_SHOTS_BASELINE = 2 * TEAM_SHOTS_PER_GAME   # ~26 shots in an average match
 
 # Fraction of a match's total goals expected inside the specific time windows
-# the knockout markets ask about. Rough, but well above a coin flip.
-GOAL_FRAC_BEFORE_HYDRATION = 0.28        # before the ~30' first hydration break
-GOAL_FRAC_AFTER_HYDRATION = 0.22         # after the ~75' second hydration break
+# the knockout markets ask about. Based on actual average break times:
+#   First hydration break:  ~22'  (window = 0' to 22')
+#   Second hydration break: ~67'  (window = 67' to 90'+stoppage ~5' = ~28 min)
+#
+# Goals are NOT uniformly distributed across 90 minutes:
+#   - 0-22' (before 1st break): ~20% of goals — teams settle in, defences set
+#   - 67-90'+5' (after 2nd break): ~38% of goals — fatigue, subs, trailing teams
+#     pushing forward, stoppage-time goals (~5' window punches way above its share)
+#
+# Calibrated against group-stage results: before-hydration was slightly
+# over-predicted, after-hydration was meaningfully under-predicted.
+GOAL_FRAC_BEFORE_HYDRATION = 0.20        # before the ~22' first hydration break
+GOAL_FRAC_AFTER_HYDRATION = 0.38         # after the ~67' second hydration break
 GOAL_FRAC_FIRST_HALF_STOPPAGE = 0.05     # first-half added time
 GOAL_FRAC_SECOND_HALF_STOPPAGE = 0.09    # second-half added time
 # Fallback P(goal in window) when no odds/xG are available.
 GOAL_WINDOW_FALLBACK = {
-    "before_hydration": 0.45,
-    "after_hydration": 0.40,
+    "before_hydration": 0.34,
+    "after_hydration": 0.62,
     "first_half_stoppage": 0.10,
     "second_half_stoppage": 0.16,
 }
@@ -183,10 +215,30 @@ PERIPHERAL_TYPES = {
     "team_more_than_opponent",
 }
 
+# Per-type shrink overrides (fraction of deviation from 50 KEPT). Group-stage
+# calibration: team_corners was UNDER-predicted (hugging 50 from below), so it
+# keeps more of its now-xG-scaled deviation. total_corners was OVER-predicted,
+# so it keeps the default heavier shrink — lightening it would amplify the over.
+PERIPHERAL_SHRINK_OVERRIDES = {
+    "team_corners": 0.65,
+}
+
 
 def _shrink_to_half(prob, keep):
     """Pull a probability toward 0.50, keeping `keep` of its deviation."""
     return 0.50 + (prob - 0.50) * keep
+
+
+def _sot_per_xg(team_xg):
+    """
+    Shots-on-target-per-xG ratio for a team, scaled by its attacking dominance.
+    Favorites (high xG) convert xG into more shots on target than average/weak
+    teams. Falls back to the base ratio when team_xg is unavailable.
+    """
+    if not team_xg:
+        return SOT_PER_XG_BASE
+    ratio = SOT_PER_XG_BASE * (1 + SOT_PER_XG_SLOPE * (team_xg / AVG_TEAM_XG - 1))
+    return max(SOT_PER_XG_MIN, min(SOT_PER_XG_MAX, ratio))
 
 
 def _match_name(market):
@@ -320,41 +372,51 @@ def _real_player_stats(player_name):
     return stats
 
 
+def _player_team_context(player, match_name, xg_home, xg_away):
+    """
+    The SOLE adjustment to a player's rate: how strong their team is expected to
+    be in this match, as team_xg / PLAYER_TEAM_XG_REF (clamped). Weak/underdog
+    teams scale their players down; strong teams sit near their full rate. When
+    the team or match xG can't be resolved (no odds, or player not in the squad
+    cache) we assume an average team.
+    """
+    team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
+    if team_xg is None:
+        team_xg = AVG_TEAM_XG
+    return max(PLAYER_TEAM_XG_FLOOR, min(PLAYER_TEAM_XG_CEIL, team_xg / PLAYER_TEAM_XG_REF))
+
+
 def _player_sot_prob(player, threshold, half, match_name, xg_home, xg_away):
     """
     Probability a single player records `threshold`+ shots on target.
 
-    Shared by the `player_shot_on_target` handler and the `team_total_sot`
-    safety net (knockout player markets that lacked a "(Country)" tag and were
-    parsed as a team). Uses real per-90 stats when available, else prices off
-    the player's national-team xG, else a conservative shrunk base rate. The
-    model is blended toward a conservative WC baseline (club per-90 rates
-    over-predict in tight tournament matches), with the baseline scaled down for
-    multi-SOT thresholds.
+    The player's own SoT/90 (or a team-xG estimate when we have no stats) is
+    adjusted ONLY by their team's expected performance in this match — no pull
+    toward a crowd baseline. Shared by the `player_shot_on_target` handler and
+    the `team_total_sot` safety net (knockout player markets parsed as a team).
     """
     threshold = threshold or 1
+    context = _player_team_context(player, match_name, xg_home, xg_away)
     stats = _real_player_stats(player)
     if stats and stats.get("shots_on_target_per_90", 0.0) >= MIN_REAL_STAT:
-        player_xsot = stats["shots_on_target_per_90"]
+        # Real stats: player's own rate, scaled by team performance.
+        player_xsot = stats["shots_on_target_per_90"] * context
     else:
         team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
         if team_xg is None:
-            # Team unidentifiable -> conservative base rate (shrunk to 50),
-            # scaled down for half-specific and multi-SOT questions.
+            # No stats and no team/odds -> no information; conservative default.
             base = PLAYER_SOT_BASE * (0.5 ** (threshold - 1))
             if half:
                 base *= _half_share(half)
-            return _shrink_to_half(base, 0.6)
-        player_xsot = (team_xg * SOT_PER_XG) / TEAM_AVG_PLAYERS_SHOOTING
+            return base
+        # Team known but no player stats: team-xG-derived per-player estimate
+        # (already reflects team performance, so no extra context multiplier).
+        player_xsot = (team_xg * _sot_per_xg(team_xg)) / TEAM_AVG_PLAYERS_SHOOTING
     if half:
         player_xsot *= _half_share(half)
     if threshold <= 1:
-        model_prob = prob_at_least_one(player_xsot)
-        baseline = PLAYER_SOT_BASELINE
-    else:
-        model_prob = prob_over_under(player_xsot, threshold, "over")
-        baseline = PLAYER_SOT_BASELINE * (0.5 ** (threshold - 1))
-    return PLAYER_BASELINE_WEIGHT * baseline + (1 - PLAYER_BASELINE_WEIGHT) * model_prob
+        return prob_at_least_one(player_xsot)
+    return prob_over_under(player_xsot, threshold, "over")
 
 
 def _model_prob_for_market(market, odds_index):
@@ -478,8 +540,8 @@ def _model_prob_for_market(market, odds_index):
     # ---------- Halftime both teams have a shot on target ----------
     if qtype == "halftime_both_sot":
         if xg_home is not None:
-            mu_h = (max(MIN_TEAM_SOT, xg_home * SOT_PER_XG)) * FIRST_HALF_GOAL_SHARE
-            mu_a = (max(MIN_TEAM_SOT, xg_away * SOT_PER_XG)) * FIRST_HALF_GOAL_SHARE
+            mu_h = (max(MIN_TEAM_SOT, xg_home * _sot_per_xg(xg_home))) * FIRST_HALF_GOAL_SHARE
+            mu_a = (max(MIN_TEAM_SOT, xg_away * _sot_per_xg(xg_away))) * FIRST_HALF_GOAL_SHARE
             return prob_at_least_one(mu_h) * prob_at_least_one(mu_a)
         return 0.45
 
@@ -493,24 +555,22 @@ def _model_prob_for_market(market, odds_index):
     # ---------- Player goal involvement (goal or assist) ----------
     if qtype == "player_goal_involvement":
         player = parsed.get("player", "")
+        context = _player_team_context(player, match_name, xg_home, xg_away)
         stats = _real_player_stats(player)
         if (stats and stats.get("shots_per_90", 0.0) >= MIN_REAL_STAT
                 and stats.get("conversion_rate", 0.0) >= MIN_REAL_STAT):
-            player_xg = stats["shots_per_90"] * stats["conversion_rate"]
+            # Real stats: player's own rates, scaled only by team performance.
+            player_xg = stats["shots_per_90"] * stats["conversion_rate"] * context
             p_goal = prob_at_least_one(player_xg)
-            p_assist = prob_at_least_one(stats.get("xA_per_90", 0.0))
+            p_assist = prob_at_least_one(stats.get("xA_per_90", 0.0) * context)
         else:
-            # No real stats: price off the player's actual team xG if known.
+            # No real stats: team-xG-derived estimate (already team-scaled).
             team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
             if team_xg is None:
-                # Team unidentifiable -> conservative base rate (shrunk to 50).
-                return _shrink_to_half(PLAYER_GOAL_INVOLVEMENT_BASE, 0.6)
+                return PLAYER_GOAL_INVOLVEMENT_BASE   # no information
             p_goal = prob_at_least_one(team_xg / TEAM_AVG_GOAL_SCORERS)
             p_assist = prob_at_least_one(team_xg * PLAYER_ASSIST_RATE)
-        model_prob = 1 - (1 - p_goal) * (1 - p_assist)
-        # Blend with conservative WC baseline — model alone over-predicts because
-        # club per-90 stats don't translate directly to tight tournament matches.
-        return PLAYER_BASELINE_WEIGHT * PLAYER_GOAL_INVOLVEMENT_BASELINE + (1 - PLAYER_BASELINE_WEIGHT) * model_prob
+        return 1 - (1 - p_goal) * (1 - p_assist)
 
     # ---------- Team total shots on target ----------
     if qtype == "team_total_sot":
@@ -523,7 +583,8 @@ def _model_prob_for_market(market, odds_index):
                 parsed.get("half"), match_name, xg_home, xg_away,
             )
         team_xg = _team_xg_for(parsed, match_name, xg_home, xg_away)
-        mu = max(MIN_TEAM_SOT, (team_xg if team_xg else 1.3) * SOT_PER_XG)
+        eff_xg = team_xg if team_xg else 1.3
+        mu = max(MIN_TEAM_SOT, eff_xg * _sot_per_xg(eff_xg))
         if parsed.get("half"):
             mu *= _half_share(parsed["half"])
         return prob_over_under(mu, parsed["threshold"], parsed["direction"])
@@ -531,7 +592,7 @@ def _model_prob_for_market(market, odds_index):
     # ---------- Total shots on target (match) ----------
     if qtype == "total_sot":
         if total_xg is not None:
-            mu = max(2 * MIN_TEAM_SOT, total_xg * SOT_PER_XG)
+            mu = max(2 * MIN_TEAM_SOT, total_xg * _sot_per_xg(total_xg / 2))
         else:
             mu = 9.0
         if parsed.get("half"):
@@ -540,7 +601,14 @@ def _model_prob_for_market(market, odds_index):
 
     # ---------- Team corners ----------
     if qtype == "team_corners":
-        mu = AVG_CORNERS_PER_TEAM * (_half_share(parsed.get("half")) if parsed.get("half") else 1.0)
+        # Scale the base corner count by the team's attacking intent (xG):
+        # attacking sides win more corners. Falls back to flat when no odds.
+        base_mu = AVG_CORNERS_PER_TEAM
+        team_xg = _team_xg_for(parsed, match_name, xg_home, xg_away)
+        if team_xg is not None:
+            xg_ratio = team_xg / AVG_TEAM_XG
+            base_mu = AVG_CORNERS_PER_TEAM * (1 + CORNER_XG_SCALE * (xg_ratio - 1))
+        mu = base_mu * (_half_share(parsed.get("half")) if parsed.get("half") else 1.0)
         return prob_over_under(mu, parsed["threshold"], parsed["direction"])
 
     # ---------- Team offsides ----------
@@ -572,8 +640,10 @@ def _model_prob_for_market(market, odds_index):
         share = _half_share(parsed.get("half")) if parsed.get("half") else 1.0
         if metric == "shots on target" and xg_home is not None:
             is_home = team_is_home(match_name, parsed.get("team", ""))
-            mu_team = max(MIN_TEAM_SOT, (xg_home if is_home else xg_away) * SOT_PER_XG) * share
-            mu_opp = max(MIN_TEAM_SOT, (xg_away if is_home else xg_home) * SOT_PER_XG) * share
+            xg_t = xg_home if is_home else xg_away
+            xg_o = xg_away if is_home else xg_home
+            mu_team = max(MIN_TEAM_SOT, xg_t * _sot_per_xg(xg_t)) * share
+            mu_opp = max(MIN_TEAM_SOT, xg_o * _sot_per_xg(xg_o)) * share
             return prob_x_greater_than_y(mu_team, mu_opp)
         if metric == "goals" and xg_home is not None:
             is_home = team_is_home(match_name, parsed.get("team", ""))
@@ -655,7 +725,13 @@ def _model_prob_for_market(market, odds_index):
 
     # ---------- Total corners (both teams) ----------
     if qtype == "total_corners":
-        mu = 2 * AVG_CORNERS_PER_TEAM * (_half_share(parsed.get("half")) if parsed.get("half") else 1.0)
+        # Scale the base corner count by the match's combined attacking intent
+        # (total xG vs an average match). Falls back to flat when no odds.
+        base_mu = AVG_TOTAL_CORNERS
+        if total_xg is not None:
+            xg_ratio = total_xg / (2 * AVG_TEAM_XG)
+            base_mu = AVG_TOTAL_CORNERS * (1 + CORNER_XG_SCALE * (xg_ratio - 1))
+        mu = base_mu * (_half_share(parsed.get("half")) if parsed.get("half") else 1.0)
         return prob_over_under(mu, parsed["threshold"], parsed["direction"])
 
     # ---------- Total offsides (both teams) ----------
@@ -744,7 +820,8 @@ def run_model_on_market(market, odds_index):
     # Shrink signal-less peripheral markets toward 50 to limit Brier downside.
     qtype = parse_question(market.get("question", "")).get("type")
     if qtype in PERIPHERAL_TYPES:
-        prob = _shrink_to_half(prob, PERIPHERAL_SHRINK)
+        keep = PERIPHERAL_SHRINK_OVERRIDES.get(qtype, PERIPHERAL_SHRINK)
+        prob = _shrink_to_half(prob, keep)
     return format_prediction_for_submission(prob)
 
 
