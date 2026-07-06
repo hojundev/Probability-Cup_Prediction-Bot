@@ -108,6 +108,17 @@ def prob_btts_and_over(xg_home, xg_away, threshold, max_goals=15):
     return float(p)
 
 
+def prob_equal_counts(mu_a, mu_b, max_n=12):
+    """
+    P(two independent Poissons produce the same count) = Σ P(A=k)·P(B=k).
+    Used for "Will both halves have the same number of goals?".
+    """
+    p = 0.0
+    for k in range(max_n):
+        p += poisson.pmf(k, mu_a) * poisson.pmf(k, mu_b)
+    return float(p)
+
+
 def prob_exactly(xg_home, xg_away, n, max_goals=12):
     """
     P(total goals == n) for two independent Poissons.

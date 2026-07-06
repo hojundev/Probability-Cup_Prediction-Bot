@@ -28,6 +28,9 @@ from collections import defaultdict
 
 logging.basicConfig(level=logging.WARNING)
 
+# Diagnostic tool — never write to the player cache.
+import data.fetch_player_stats as _fps; _fps._api_disabled = True
+
 from bot.client import get_probability_cup_lobby_and_event, join_lobby, fetch_results
 from bot.question_parser import parse_question
 

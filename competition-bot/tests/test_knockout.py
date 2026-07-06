@@ -85,6 +85,14 @@ CASES = [
     ("total_goals_exact", "Will the match finish with exactly 2 total goals in regulation (90 minutes + stoppage time)?"),
     ("penalty_shootout", "Will the match be decided by a penalty shootout?"),
 
+    # --- POR vs ESP new types ---
+    ("match_draw", "Will the match go to extra time?"),
+    ("total_subs", "Will there be 9 or more total substitutions (both teams combined) in regulation (90 minutes + stoppage time)?"),
+    ("goalkeeper_saves", "Will Diogo Costa (Portugal) make 4 or more saves in regulation (90 minutes + stoppage time)?"),
+    ("both_halves_same_goals", "Will both halves have the same number of goals in regulation (90 minutes + stoppage time)?"),
+    ("any_player_sot", "Will any Portugal player have 2 or more shots on target in regulation (90 minutes + stoppage time)?"),
+    ("team_score", "Will any Portugal player score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
+
     # CIV vs NOR
     ("player_goal_involvement", "Will Erling Haaland (Norway) score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
     ("team_more_than_opponent", "Will Ivory Coast have more corner kicks than Norway in regulation (90 minutes + stoppage time)?"),

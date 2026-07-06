@@ -31,6 +31,7 @@ from model.poisson import (
     prob_x_greater_than_y,
     prob_win_by_margin,
     prob_exactly,
+    prob_equal_counts,
 )
 from model.ensemble import blend_probabilities, format_prediction_for_submission
 from model.elo import load_wc2026_ratings
@@ -51,8 +52,8 @@ SECOND_HALF_GOAL_SHARE = 0.57
 #
 # At team_xg = AVG_TEAM_XG the ratio is exactly SOT_PER_XG_BASE (3.3, calibrated
 # from the ~4.3-SOT / ~1.3-xG match average).
-SOT_PER_XG = 3.3               # base ratio (kept for fallbacks that lack a team xG)
-SOT_PER_XG_BASE = 3.3
+SOT_PER_XG_BASE = 3.6
+SOT_PER_XG = 3.6               # base ratio (kept for fallbacks that lack a team xG)
 SOT_PER_XG_SLOPE = 0.45        # how strongly the ratio rises with team dominance (raised: team_total_sot under-predicted by ~10pts)
 SOT_PER_XG_MIN = 2.9           # clamp: weak teams don't drop below this
 SOT_PER_XG_MAX = 4.2           # clamp: elite favorites don't exceed this
@@ -64,6 +65,14 @@ AVG_CORNERS_PER_TEAM = 5.0      # per team; reverted from 5.5 (R32 recap showed 
 AVG_TOTAL_CORNERS = 9.0         # both teams; calibrated down (total-corner overs were over-predicted)
 AVG_OFFSIDES_PER_TEAM = 1.7
 AVG_CARDS_TOTAL = 2.665        # yellow + red per match; 2026 WC actuals: 2.54Y + 0.125R
+
+# Total substitutions (both teams). Knockouts allow 5 per team (+1 in ET), and
+# nearly every match uses all of them, so 9+ in regulation is highly likely.
+# Flat base rate market, calibrated by threshold.
+TOTAL_SUBS_RATES = {8: 0.90, 9: 0.80, 10: 0.55, 11: 0.25, 12: 0.10}
+# Goalkeeper saves ≈ opponent's shots on target that aren't goals. A keeper faces
+# roughly the opponent's SOT; saves = SOT - goals conceded. mu_saves ≈ opp_SOT × 0.7.
+GK_SAVES_FROM_SOT = 0.70       # fraction of faced SOT that become saves (rest are goals)
 
 # --- xG-adjusted offsides ---------------------------------------------------
 # A flat offside rate ignores playing style: attacking sides (high xG) push the
@@ -108,7 +117,7 @@ PLAYER_ASSIST_RATE = 0.15      # share of team xG attributable to one player's a
 # Club xA rates over-state assist probability in tight WC knockout matches —
 # playmakers create fewer clear chances under defensive pressure. This multiplier
 # deflates the xA path in player_goal_involvement without touching the goal path.
-PLAYER_XA_WC_FACTOR = 0.70    # WC conservatism on xA: 0.7 = 30% deflation on assist path
+PLAYER_XA_WC_FACTOR = 0.55    # WC conservatism on xA: lowered 0.70->0.55 (player_goal_involvement over-predicted +6.3pts)
 MIN_REAL_STAT = 0.01           # below this a "real" per-90 stat is treated as a miss
 MIN_CONVERSION_RATE = 0.04    # floor for conversion_rate in goal-involvement model;
                                # players with conversion_rate: 0 use this so their
@@ -143,7 +152,7 @@ PLAYER_SOT_BASE = 0.45                # P(>=1 shot on target) for a generic feat
 #     rates more.
 #   - PLAYER_TEAM_XG_CEIL: max multiplier (1.0 = a strong-team player tops out at
 #     their raw rate, no upside boost).
-PLAYER_TEAM_XG_REF = 2.1      # team xG corresponding to ~full per-90 rate realization (raised: player SOT/involvement over-predicted by ~6-8pts)
+PLAYER_TEAM_XG_REF = 2.3      # team xG for ~full per-90 rate realization; raised 2.1->2.3 (player SOT over-predicted +7.4pts)
 PLAYER_TEAM_XG_FLOOR = 0.20   # min context multiplier (don't zero out a star on a minnow)
 PLAYER_TEAM_XG_CEIL = 1.00    # max context multiplier (1.0 = no upside boost)
 
@@ -217,11 +226,13 @@ PERIPHERAL_TYPES = {
     "team_corners",
     "team_offsides",
     "team_cards",
-    "total_cards",
     "total_corners",
     "total_offsides",
     "team_more_than_opponent",
 }
+# total_cards removed from PERIPHERAL_TYPES: the raw Poisson is well-calibrated
+# (P(>=4 | mu=2.665) ≈ 28% matches actual 32.3% hit rate); the shrink was
+# inflating accurate predictions from 28% to 42%, causing +18pt over-prediction.
 
 # Per-type shrink overrides (fraction of deviation from 50 KEPT). Group-stage
 # calibration: team_corners was UNDER-predicted (hugging 50 from below), so it
@@ -715,9 +726,36 @@ def _model_prob_for_market(market, odds_index):
             return 1 - prob_at_least_one(opp_xg)   # P(opponent scores 0)
         return 0.30
 
-    # ---------- Regulation ends in a draw ----------
+    # ---------- Regulation ends in a draw (also "goes to extra time") ----------
     if qtype == "match_draw":
         return p_draw_sp if odds else 0.25
+
+    # ---------- Total substitutions (both teams) ----------
+    if qtype == "total_subs":
+        thr = parsed.get("threshold", 9)
+        direction = parsed.get("direction", "over")
+        p_over = TOTAL_SUBS_RATES.get(thr, 0.80 if thr <= 9 else 0.20)
+        return p_over if direction == "over" else 1 - p_over
+
+    # ---------- Goalkeeper saves ----------
+    # Saves ≈ the OPPONENT's shots on target that don't score. The keeper's team
+    # is the question subject; find the opponent's xG -> opponent SOT -> saves.
+    if qtype == "goalkeeper_saves":
+        keeper_team_xg = _player_team_xg(parsed.get("player", ""), match_name, xg_home, xg_away)
+        opp_xg = None
+        if keeper_team_xg is not None and xg_home is not None:
+            opp_xg = xg_away if abs(keeper_team_xg - xg_home) < 1e-9 else xg_home
+        if opp_xg is None:
+            opp_xg = 1.3  # average opponent when unresolved
+        mu_saves = opp_xg * _sot_per_xg(opp_xg) * GK_SAVES_FROM_SOT
+        return prob_over_under(mu_saves, parsed["threshold"], parsed["direction"])
+
+    # ---------- Both halves have the same number of goals ----------
+    if qtype == "both_halves_same_goals":
+        if total_xg is not None:
+            return prob_equal_counts(total_xg * FIRST_HALF_GOAL_SHARE,
+                                     total_xg * SECOND_HALF_GOAL_SHARE)
+        return 0.33
 
     # ---------- Advance to the next round ----------
     if qtype == "team_advance":

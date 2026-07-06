@@ -205,6 +205,9 @@ def fetch_player_stats(player_name: str) -> dict:
             "burkina faso", "saudi arabia", "south korea", "north korea",
             "costa rica", "el salvador", "trinidad and tobago",
             "bosnia and herzegovina", "united states", "new caledonia",
+            "any portugal player", "any brazil player", "any france player",
+            "any argentina player", "any spain player", "any england player",
+            "any germany player", "any norway player", "any croatia player",
         }
         if key in _NON_PERSON_KEYS:
             import logging

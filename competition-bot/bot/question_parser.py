@@ -158,6 +158,14 @@ def parse_question(question: str) -> dict:
             return {"type": "unknown", "raw": question}
 
     # ---- Player markets ----------------------------------------------------
+    # "Will any <team> player score/assist...?" — team-level market, not a single
+    # player. Checked first so "any Portugal player" isn't captured as a name.
+    if "any" in q and "player" in q and "score" in q and (
+        "more than 1 goal" not in q and "2 or more goals" not in q and "brace" not in q):
+        m = re.search(r"will any\s+" + _TEAM_RE + r"\s+player", q)
+        if m and _looks_like_team(m.group(1)):
+            return {"type": "team_score", "team": _title(m.group(1))}
+
     # "Will <player> score or assist a goal (excluding own goals)?"
     if "score or assist" in q:
         m = re.search(r"will\s+" + _TEAM_RE + r"\s+score or assist", q)
@@ -180,8 +188,9 @@ def parse_question(question: str) -> dict:
     ):
         return {"type": "any_player_brace"}
 
-    # "Will any player record 2 or more shots on target?"
-    if "any player" in q and ("shot on target" in q or "shots on target" in q):
+    # "Will any player record 2 or more shots on target?" OR
+    # "Will any <team> player have 2 or more shots on target?"
+    if "any" in q and "player" in q and ("shot on target" in q or "shots on target" in q):
         n, direction = _threshold(q)
         return {"type": "any_player_sot", "threshold": n or 2, "direction": direction or "over"}
 
@@ -255,6 +264,31 @@ def parse_question(question: str) -> dict:
     # ---- Regulation ends in a draw (knockout) ------------------------------
     if ("end in a tie" in q or "end in a draw" in q) and "halftime" not in q:
         return {"type": "match_draw"}
+
+    # ---- Match goes to extra time (knockout) -------------------------------
+    # Equivalent to "regulation ends level" -> reuse the match_draw model.
+    if "extra time" in q and ("go to extra time" in q or "reach extra time" in q
+                              or "go to extra-time" in q):
+        return {"type": "match_draw"}
+
+    # ---- Total substitutions (knockout) ------------------------------------
+    # "Will there be 9 or more total substitutions?" — near-certain given 5 subs
+    # allowed per team; a flat base rate market.
+    if "substitution" in q and ("total" in q or "combined" in q or "there be" in q):
+        n, direction = _threshold(q)
+        return {"type": "total_subs", "threshold": n or 9, "direction": direction or "over"}
+
+    # ---- Goalkeeper saves (knockout) ---------------------------------------
+    # "Will <keeper> make 4 or more saves?" — driven by the opponent's SOT.
+    if "save" in q and "make" in q:
+        n, direction = _threshold(q)
+        m = re.search(r"will\s+" + _TEAM_RE + r"\s+make", q)
+        return {"type": "goalkeeper_saves", "player": _clean_player_name(m.group(1) if m else ""),
+                "threshold": n or 3, "direction": direction or "over"}
+
+    # ---- Both halves have the same number of goals (knockout) --------------
+    if "both halves" in q and "same number of goals" in q:
+        return {"type": "both_halves_same_goals"}
 
     # ---- Advance / qualify to the next round (knockout) --------------------
     if "advance to" in q or "advance past" in q or "qualify for" in q:

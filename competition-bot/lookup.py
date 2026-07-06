@@ -17,6 +17,11 @@ import sys
 import logging
 logging.basicConfig(level=logging.WARNING)  # suppress info noise
 
+# Disable api-football lookups for this read-only diagnostic tool.
+# lookup.py should never write to the player cache — it's for inspection only.
+import data.fetch_player_stats as _fps
+_fps._api_disabled = True
+
 from bot.client import get_probability_cup_lobby_and_event, fetch_matches, fetch_markets
 from data.fetch_odds import fetch_market_odds
 from bot.match_data import build_odds_index

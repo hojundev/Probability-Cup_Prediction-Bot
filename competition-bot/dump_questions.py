@@ -22,6 +22,9 @@ from collections import Counter, defaultdict
 
 logging.basicConfig(level=logging.WARNING)  # suppress info noise
 
+# Diagnostic tool — never write to the player cache.
+import data.fetch_player_stats as _fps; _fps._api_disabled = True
+
 from bot.client import get_probability_cup_lobby_and_event, fetch_matches, fetch_markets
 from bot.question_parser import parse_question
 
