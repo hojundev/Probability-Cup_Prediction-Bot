@@ -30,6 +30,7 @@ from model.poisson import (
     halftime_outcome_probs,
     prob_x_greater_than_y,
     prob_win_by_margin,
+    prob_exactly,
 )
 from model.ensemble import blend_probabilities, format_prediction_for_submission
 from model.elo import load_wc2026_ratings
@@ -52,14 +53,14 @@ SECOND_HALF_GOAL_SHARE = 0.57
 # from the ~4.3-SOT / ~1.3-xG match average).
 SOT_PER_XG = 3.3               # base ratio (kept for fallbacks that lack a team xG)
 SOT_PER_XG_BASE = 3.3
-SOT_PER_XG_SLOPE = 0.35        # how strongly the ratio rises with team dominance
+SOT_PER_XG_SLOPE = 0.45        # how strongly the ratio rises with team dominance (raised: team_total_sot under-predicted by ~10pts)
 SOT_PER_XG_MIN = 2.9           # clamp: weak teams don't drop below this
 SOT_PER_XG_MAX = 4.2           # clamp: elite favorites don't exceed this
 MIN_TEAM_SOT = 2.5
 
 # Historical per-match base rates used as calibrated priors for peripheral
 # markets the bookmaker feed doesn't cover. These beat a naive 0.50.
-AVG_CORNERS_PER_TEAM = 5.5      # per team; calibrated up (team-corner overs were under-predicted)
+AVG_CORNERS_PER_TEAM = 5.0      # per team; reverted from 5.5 (R32 recap showed threshold corners over-predicted -2.4 RBP)
 AVG_TOTAL_CORNERS = 9.0         # both teams; calibrated down (total-corner overs were over-predicted)
 AVG_OFFSIDES_PER_TEAM = 1.7
 AVG_CARDS_TOTAL = 2.665        # yellow + red per match; 2026 WC actuals: 2.54Y + 0.125R
@@ -79,9 +80,9 @@ OFFSIDE_XG_SCALE = 0.6        # how strongly xG modulates the offside rate
 CORNER_XG_SCALE = 0.5         # how strongly xG modulates corner counts (attacking sides win more)
 AVG_FOULS_PER_TEAM = 12.0
 PENALTY_AWARDED_RATE = 0.26    # P(>=1 penalty in a match)
-PENALTY_OR_RED_RATE = 0.29     # P(penalty OR red card); calibrated down from group-stage results
+PENALTY_OR_RED_RATE = 0.24     # calibrated down: was over-predicted by +10pts (37% pred vs 28% actual)
 
-TEAM_SHOTS_PER_GAME = 13.0
+TEAM_SHOTS_PER_GAME = 12.3     # 2026 WC actual average
 TEAM_SHOTS_ON_TARGET_PER_GAME = 4.5
 
 # Weight on the (sharp) betting-market line when blending with the model.
@@ -104,7 +105,14 @@ ELO = load_wc2026_ratings()
 TEAM_AVG_PLAYERS_SHOOTING = 4.0
 TEAM_AVG_GOAL_SCORERS = 2.5
 PLAYER_ASSIST_RATE = 0.15      # share of team xG attributable to one player's assists
+# Club xA rates over-state assist probability in tight WC knockout matches —
+# playmakers create fewer clear chances under defensive pressure. This multiplier
+# deflates the xA path in player_goal_involvement without touching the goal path.
+PLAYER_XA_WC_FACTOR = 0.70    # WC conservatism on xA: 0.7 = 30% deflation on assist path
 MIN_REAL_STAT = 0.01           # below this a "real" per-90 stat is treated as a miss
+MIN_CONVERSION_RATE = 0.04    # floor for conversion_rate in goal-involvement model;
+                               # players with conversion_rate: 0 use this so their
+                               # shot volume still contributes to the goal probability
 # Cap live api-football player lookups per run to protect the 100/day quota.
 MAX_PLAYER_REQUESTS_PER_RUN = 20
 
@@ -135,7 +143,7 @@ PLAYER_SOT_BASE = 0.45                # P(>=1 shot on target) for a generic feat
 #     rates more.
 #   - PLAYER_TEAM_XG_CEIL: max multiplier (1.0 = a strong-team player tops out at
 #     their raw rate, no upside boost).
-PLAYER_TEAM_XG_REF = 1.9      # team xG corresponding to ~full per-90 rate realization
+PLAYER_TEAM_XG_REF = 2.1      # team xG corresponding to ~full per-90 rate realization (raised: player SOT/involvement over-predicted by ~6-8pts)
 PLAYER_TEAM_XG_FLOOR = 0.20   # min context multiplier (don't zero out a star on a minnow)
 PLAYER_TEAM_XG_CEIL = 1.00    # max context multiplier (1.0 = no upside boost)
 
@@ -220,7 +228,7 @@ PERIPHERAL_TYPES = {
 # keeps more of its now-xG-scaled deviation. total_corners was OVER-predicted,
 # so it keeps the default heavier shrink — lightening it would amplify the over.
 PERIPHERAL_SHRINK_OVERRIDES = {
-    "team_corners": 0.65,
+    "team_corners": 0.50,   # lowered from 0.65; R32 recap showed threshold corners over-predicted
 }
 
 
@@ -496,6 +504,21 @@ def _model_prob_for_market(market, odds_index):
             return prob_total_goals(xg_home, xg_away, parsed["threshold"], parsed["direction"])
         return DEFAULT_PROB
 
+    # ---------- Exact total goals (knockout) ----------
+    # "Will exactly N goals be scored?" — Poisson PMF.
+    if qtype == "total_goals_exact":
+        n = parsed.get("n", 1)
+        if total_xg is not None:
+            return prob_exactly(xg_home, xg_away, n)
+        return prob_exactly(1.3, 1.3, n)  # average match fallback
+
+    # ---------- Penalty shootout (knockout) ----------
+    # P(shootout) = P(regulation draw) × P(no winner after ET) ≈ p_draw × 0.5
+    if qtype == "penalty_shootout":
+        if p_draw_sp is not None:
+            return p_draw_sp * 0.5
+        return 0.13  # fallback: ~25% avg draw rate × 0.5
+
     # ---------- Total goals (one half) ----------
     if qtype == "half_total_goals":
         if total_xg is not None:
@@ -557,19 +580,21 @@ def _model_prob_for_market(market, odds_index):
         player = parsed.get("player", "")
         context = _player_team_context(player, match_name, xg_home, xg_away)
         stats = _real_player_stats(player)
-        if (stats and stats.get("shots_per_90", 0.0) >= MIN_REAL_STAT
-                and stats.get("conversion_rate", 0.0) >= MIN_REAL_STAT):
-            # Real stats: player's own rates, scaled only by team performance.
-            player_xg = stats["shots_per_90"] * stats["conversion_rate"] * context
+        if stats and stats.get("shots_per_90", 0.0) >= MIN_REAL_STAT:
+            # Real stats: use player's own shooting volume. Floor conversion_rate
+            # at MIN_CONVERSION_RATE so a cached 0 doesn't zero out the goal path
+            # (a high-volume shooter with unknown conversion still scores sometimes).
+            conv = max(MIN_CONVERSION_RATE, stats.get("conversion_rate", 0.0))
+            player_xg = stats["shots_per_90"] * conv * context
             p_goal = prob_at_least_one(player_xg)
-            p_assist = prob_at_least_one(stats.get("xA_per_90", 0.0) * context)
+            p_assist = prob_at_least_one(stats.get("xA_per_90", 0.0) * context * PLAYER_XA_WC_FACTOR)
         else:
             # No real stats: team-xG-derived estimate (already team-scaled).
             team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
             if team_xg is None:
                 return PLAYER_GOAL_INVOLVEMENT_BASE   # no information
             p_goal = prob_at_least_one(team_xg / TEAM_AVG_GOAL_SCORERS)
-            p_assist = prob_at_least_one(team_xg * PLAYER_ASSIST_RATE)
+            p_assist = prob_at_least_one(team_xg * PLAYER_ASSIST_RATE * PLAYER_XA_WC_FACTOR)
         return 1 - (1 - p_goal) * (1 - p_assist)
 
     # ---------- Team total shots on target ----------
@@ -716,7 +741,13 @@ def _model_prob_for_market(market, odds_index):
     # ---------- Total shots (on + off target) ----------
     if qtype == "total_shots":
         if total_xg is not None:
-            mu = TOTAL_SHOTS_BASELINE * (total_xg / (2 * AVG_TEAM_XG))
+            # Scale by match xG relative to average, but cap the upward scaling
+            # so blowout matches (high total_xg) don't generate unrealistically
+            # high shot counts. Dominant teams produce quality chances, not
+            # proportionally more shots. Floor at 0.7 so very low-xG matches
+            # don't drop too far below the baseline.
+            xg_ratio = max(0.7, min(1.2, total_xg / (2 * AVG_TEAM_XG)))
+            mu = TOTAL_SHOTS_BASELINE * xg_ratio
         else:
             mu = TOTAL_SHOTS_BASELINE
         if parsed.get("half"):

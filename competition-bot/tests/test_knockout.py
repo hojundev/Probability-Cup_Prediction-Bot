@@ -80,6 +80,11 @@ CASES = [
     ("player_shot_on_target", "Will Ayase Ueda have at least 1 shot on target in regulation (90 minutes + stoppage time)?"),
     ("match_draw", "Will regulation (90 minutes + stoppage time) end in a tie?"),
 
+    # --- New knockout question types ---
+    ("total_goals_exact", "Will exactly 1 goal be scored in regulation (90 minutes + stoppage time)?"),
+    ("total_goals_exact", "Will the match finish with exactly 2 total goals in regulation (90 minutes + stoppage time)?"),
+    ("penalty_shootout", "Will the match be decided by a penalty shootout?"),
+
     # CIV vs NOR
     ("player_goal_involvement", "Will Erling Haaland (Norway) score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
     ("team_more_than_opponent", "Will Ivory Coast have more corner kicks than Norway in regulation (90 minutes + stoppage time)?"),
@@ -180,6 +185,19 @@ def test_player_country_tag_stripped():
     assert p["threshold"] == 3
     p2 = parse_question("Will Lautaro Martínez (Argentina) score a goal (excluding own goals)?")
     assert p2["player"] == "Lautaro Martínez"
+
+
+def test_exact_goals_n_parsed():
+    """total_goals_exact correctly extracts the exact goal count."""
+    p1 = parse_question("Will exactly 1 goal be scored in regulation (90 minutes + stoppage time)?")
+    assert p1["type"] == "total_goals_exact"
+    assert p1["n"] == 1
+    p2 = parse_question("Will the match finish with exactly 2 total goals in regulation (90 minutes + stoppage time)?")
+    assert p2["type"] == "total_goals_exact"
+    assert p2["n"] == 2
+    p3 = parse_question("Will exactly 3 goals be scored in regulation (90 minutes + stoppage time)?")
+    assert p3["type"] == "total_goals_exact"
+    assert p3["n"] == 3
 
 
 if __name__ == "__main__":

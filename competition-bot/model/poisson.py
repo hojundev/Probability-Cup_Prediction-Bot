@@ -108,6 +108,19 @@ def prob_btts_and_over(xg_home, xg_away, threshold, max_goals=15):
     return float(p)
 
 
+def prob_exactly(xg_home, xg_away, n, max_goals=12):
+    """
+    P(total goals == n) for two independent Poissons.
+    Used for "Will exactly N goals be scored?" knockout markets.
+    """
+    p = 0.0
+    for i in range(min(n + 1, max_goals)):
+        j = n - i
+        if j >= 0:
+            p += poisson.pmf(i, xg_home) * poisson.pmf(j, xg_away)
+    return float(p)
+
+
 def prob_win_by_margin(xg_team, xg_opp, margin, max_goals=12):
     """
     P(team wins by `margin` or more goals) for two independent Poissons:

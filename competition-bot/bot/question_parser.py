@@ -397,6 +397,23 @@ def parse_question(question: str) -> dict:
     if "card" in q and "first half" in q:
         return {"type": "card_first_half"}
 
+    # ---- Exact total goals (knockout) -------------------------------------
+    # "Will exactly 1 goal be scored?"
+    # "Will the match finish with exactly 2 total goals?"
+    m_exact = re.search(r"exactly\s+(\d+)\s+(?:total\s+)?goals?\s+(?:be\s+scored|in\s+regulation)", q)
+    if not m_exact:
+        m_exact = re.search(r"finish with\s+exactly\s+(\d+)\s+(?:total\s+)?goals?", q)
+    if m_exact:
+        return {"type": "total_goals_exact", "n": int(m_exact.group(1))}
+
+    # ---- Penalty shootout (knockout) --------------------------------------
+    # "Will the match be decided by a penalty shootout?"
+    # Guard: must be the main subject of the question, not a parenthetical
+    # exclusion like "hold a lead at any point (excluding a penalty shootout)".
+    if ("penalty shootout" in q or ("penalty" in q and "shootout" in q)):
+        if "excluding" not in q and "decided by" in q:
+            return {"type": "penalty_shootout"}
+
     # ---- Total goals over/under -------------------------------------------
     if "total goals" in q:
         n, direction = _threshold(q)
