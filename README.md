@@ -135,12 +135,13 @@ competition-bot/
 
 A second bot aimed at **winning per-match leaderboard prizes** (top 1 of a single match's markets), not overall competition ranking. It runs as a separate entry under a second SportsPredict API key.
 
-It reuses the entire competition-bot pipeline (same model, same data, same client) and adds two things on top:
+It reuses the entire competition-bot pipeline (same model, same data, same client) and adds a **three-tier prediction strategy** on top, calibrated from 700+ settled markets:
 
-1. **Selective extremizing** — pushes probabilities further from 50 via a logit stretch (`extremize(p, k)`) on markets with genuine signal.
-2. **Peripheral shrinkage removed** — competition-bot shrinks corners/cards/offsides toward 50 (`PERIPHERAL_SHRINK=0.35`); match-bot keeps the full model deviation (`PERIPHERAL_SHRINK=1.0`).
+1. **Binary (1/99)** — types where the model has been directionally correct with positive RBP vs crowd (match winners, totals, team score, corners, etc.)
+2. **Heavy extremize (k=2.5)** — genuine signal but less reliable direction (SOT, halftime, goal timing, etc.)
+3. **Light extremize (k=1.5)** — player markets and over-predicted types
 
-The tradeoff: higher variance — wins bigger when right, loses bigger when wrong. Correct for a per-match prize hunt, wrong for overall calibration.
+The tradeoff: high variance on binary markets — wins big when right, loses big when wrong. Correct for a per-match prize hunt.
 
 ### Setup
 
@@ -183,16 +184,21 @@ match-bot/
     └── test_match_bot.py  # Integration tests for the wrapper
 ```
 
-### match-bot Tuning
+### match-bot Three-Tier Strategy
 
-| Constant | Default | Effect |
-|----------|---------|--------|
-| `EXTREMIZE_K` | `1.75` | Logit stretch factor — higher = more aggressive / higher variance |
-| `PERIPHERAL_SHRINK` | `1.0` | Keep 100% of model's deviation from 50 (vs competition-bot's 0.35) |
-| `TARGET_MATCH` | `None` | Set to a match name (e.g. `"Ghana vs Panama"`) to submit only for that match |
-| `EXTREMIZE_TYPES` | 14 types | Market types that get pushed — player and penalty markets excluded (noisy) |
+The match-bot uses a **three-tier prediction strategy** based on calibration data from 700+ settled markets:
 
-Market types **not** extremized: `penalty_awarded`, `penalty_or_red_card`, `player_shot_on_target`, `player_goal_involvement`.
+**Tier 1 — Binary (submit 1 or 99):** types where the model has been directionally correct with positive RBP vs crowd. High-risk/high-reward — maximises gain/loss per market.
+
+**Tier 2 — Heavy extremize (k=2.5):** genuine signal but less reliable direction. Strong push from 50.
+
+**Tier 3 — Light extremize (k=1.5):** player markets and other over-predicted types. Conservative push.
+
+| Tier | Types | k |
+|------|-------|---|
+| Binary | `match_winner`, `team_advance`, `total_goals`, `total_corners`, `btts`, `team_score`, `team_score_half`, `team_more_than_opponent`, `match_draw`, `team_win_by_margin`, `team_goals_over`, `team_clean_sheet`, `btts_and_total_goals` | 1 or 99 |
+| Heavy | `team_total_sot`, `total_sot`, `total_shots`, `halftime_winning`, `half_vs_half_goals`, `team_first_goal`, `team_corners`, `team_offsides`, `total_offsides`, `halftime_tied`, `penalty_shootout`, `total_goals_exact`, and other knockout types | 2.5 |
+| Light | `player_shot_on_target`, `player_goal_involvement`, base-rate markets, `unknown` | 1.5 |
 
 ---
 
@@ -216,7 +222,7 @@ Knockout markets are phrased differently from the group stage, so the parser and
 - **Scope suffix stripping** — knockout questions append `in regulation (90 minutes + stoppage time)` (and extra-time qualifiers). These are stripped up front so the group-stage patterns keep matching; the model already prices on a 90-minute basis.
 - **New question types** — `btts`, `team_goals_over` (scores N+), `team_score_both_halves`, `team_clean_sheet`, `match_draw` (regulation ends level), `team_advance` (to next round), `team_win_by_margin`, `total_shots`, `total_corners`, `total_offsides`, `both_teams_card`, `red_card`, `card_first_half`, `card_late`, `sub_scores`, `sub_before_half`, `any_player_sot`, `any_player_brace`, and four goal-timing markets (`goal_before_hydration`, `goal_after_hydration`, `goal_first_half_stoppage`, `goal_second_half_stoppage`).
 - **Mis-route fixes** — player shot-on-target markets tagged `(Country)` (e.g. "Messi (Argentina)") now route to the player model instead of `team_total_sot`; "there be N total corners/offsides" route to whole-match totals; "win by 2+ goals" routes to a margin model; "both teams receive a card" routes to a joint model. A `team_total_sot` subject that matches neither side of the match is re-priced as a player.
-- **`team_advance`** is derived from the market line as `P(win in regulation) + 0.5 × P(draw)` (a coin flip after extra time / penalties).
+- **New question types (Round of 16+)** — `total_goals_exact` ("exactly N goals"), `penalty_shootout` (P(draw) × 0.5), `total_subs` (base-rate by threshold), `goalkeeper_saves` (opponent SOT-derived), `both_halves_same_goals` (bivariate Poisson equal-count probability). "Will the match go to extra time?" is routed to `match_draw`.
 - **Calibrated base rates** for markets with no xG signal (red card, substitutions, goal-timing windows, etc.) live as tunable constants in `submit.py` and are deliberately *not* shrunk toward 50.
 
 Run `python3 dump_questions.py` against a live round to confirm zero questions fall through to `unknown`.
@@ -231,7 +237,7 @@ Run `python3 dump_questions.py` against a live round to confirm zero questions f
 ### Question types covered (~100% of live markets)
 Group stage: `match_winner`, `team_score`, `team_score_half`, `team_first_goal`, `total_goals`, `half_total_goals`, `btts_and_total_goals`, `halftime_tied`, `halftime_winning`, `halftime_both_sot`, `player_shot_on_target`, `player_goal_involvement`, `team_total_sot`, `total_sot`, `team_corners`, `team_offsides`, `team_cards`, `total_cards`, `team_more_than_opponent`, `penalty_awarded`, `penalty_or_red_card`
 
-Knockout adds: `btts`, `team_goals_over`, `team_score_both_halves`, `team_clean_sheet`, `match_draw`, `team_advance`, `team_win_by_margin`, `total_shots`, `total_corners`, `total_offsides`, `both_teams_card`, `red_card`, `card_first_half`, `card_late`, `sub_scores`, `sub_before_half`, `any_player_sot`, `any_player_brace`, `goal_before_hydration`, `goal_after_hydration`, `goal_first_half_stoppage`, `goal_second_half_stoppage` (see [Knockout Rounds](#knockout-rounds-round-of-32))
+Knockout adds: `btts`, `team_goals_over`, `team_score_both_halves`, `team_clean_sheet`, `match_draw`, `team_advance`, `team_win_by_margin`, `total_shots`, `total_corners`, `total_offsides`, `both_teams_card`, `red_card`, `card_first_half`, `card_late`, `sub_scores`, `sub_before_half`, `any_player_sot`, `any_player_brace`, `goal_before_hydration`, `goal_after_hydration`, `goal_first_half_stoppage`, `goal_second_half_stoppage`, `total_goals_exact`, `penalty_shootout`, `total_subs`, `goalkeeper_saves`, `both_halves_same_goals` (see [Knockout Rounds](#knockout-rounds-round-of-32))
 
 ### Pipeline per market
 1. Parse question text → structured type + parameters
@@ -261,24 +267,27 @@ So an elite striker on a strong team stays high (Kane ~88) while a good shooter 
 | Constant | Value | Effect |
 |----------|-------|--------|
 | `MARKET_ALPHA` | `0.88` | Weight on sharp betting-market line vs model |
-| `PERIPHERAL_SHRINK` | `0.35` | Fraction of deviation from 50 kept on peripheral markets (lower = closer to 50) |
-| `FIRST_HALF_GOAL_SHARE` | `0.42` | Share of goals expected in the first half |
-| `SOT_PER_XG` | `3.0` | Expected shots on target per expected goal |
+| `PERIPHERAL_SHRINK` | `0.35` | Fraction of deviation from 50 kept on peripheral markets |
+| `FIRST_HALF_GOAL_SHARE` | `0.43` | Share of goals expected in the first half (WC 2026 actual) |
+| `SOT_PER_XG_BASE` | `3.6` | Base shots on target per expected goal (scales up for dominant teams via `SOT_PER_XG_SLOPE`) |
+| `SOT_PER_XG_SLOPE` | `0.45` | How strongly the SOT ratio rises with team dominance |
+| `AVG_CARDS_TOTAL` | `2.665` | Yellow + red cards per match (2026 WC actual: 2.54Y + 0.125R) |
+| `PENALTY_OR_RED_RATE` | `0.24` | P(penalty OR red card); calibrated from group-stage results |
 | `PENALTY_AWARDED_RATE` | `0.26` | P(≥1 penalty awarded in a match) |
 | `ELO_BLEND_WEIGHT` | `0.15` | Weight on Elo-derived xG split vs market-derived xG |
 | `AVG_TEAM_XG` | `1.3` | League-average team xG; baseline for xG-adjusted offsides/corners |
-| `OFFSIDE_XG_SCALE` | `0.6` | How strongly team xG scales the offside rate (0 = flat, 1 = proportional) |
+| `OFFSIDE_XG_SCALE` | `0.6` | How strongly team xG scales the offside rate |
 | `CORNER_XG_SCALE` | `0.5` | How strongly team xG scales corner counts |
-| `PLAYER_TEAM_XG_REF` | `2.3` | Team xG at which a player realizes ~their full per-90 rate; weaker teams scale their players down (single player-conservatism knob) |
-| `PLAYER_TEAM_XG_CEIL` | `1.0` | Max team-performance multiplier for a player (1.0 = no upside boost) |
-| `MAX_PLAYER_REQUESTS_PER_RUN` | `20` | Cap on live api-football player lookups per run (cache hits are free — never throttled) |
+| `PLAYER_TEAM_XG_REF` | `2.3` | Team xG for ~full per-90 player rate realization; raise to pull all players down |
+| `PLAYER_XA_WC_FACTOR` | `0.55` | WC conservatism on xA path — club assist rates over-state WC likelihood |
+| `MAX_PLAYER_REQUESTS_PER_RUN` | `20` | Cap on live api-football player lookups (cache hits are free) |
 | `BENCH_PLAYER_FACTOR` | `0.30` | Multiplier applied to player market prob when benched/absent |
 | `LINEUP_WINDOW_MINUTES` | `90` | Pre-kickoff window during which lineup polling is active |
 | `LINEUP_CHECK_INTERVAL_MINUTES` | `15` | Cadence of the lineup poll |
 
-Peripheral markets are shrunk toward 50 by `PERIPHERAL_SHRINK` (0.35), except `team_corners`, which keeps 0.65 of its deviation via `PERIPHERAL_SHRINK_OVERRIDES` (it was under-predicted; `total_corners` keeps the default since it was over-predicted).
+Peripheral markets are shrunk toward 50 by `PERIPHERAL_SHRINK` (0.35). `total_cards` was removed from `PERIPHERAL_TYPES` — the raw Poisson probability (~28% for 4+ cards) matches actual hit rates; shrinking it was inflating predictions to 42%. `team_corners` keeps 0.50 of its deviation via `PERIPHERAL_SHRINK_OVERRIDES`.
 
-Knockout base-rate priors (also in `bot/submit.py`, deliberately not shrunk): `RED_CARD_RATE` (0.15), `SUB_SCORES_RATE` (0.18), `SUB_BEFORE_HALF_RATE` (0.16), `ANY_PLAYER_BRACE_RATE` (0.20), `ANY_PLAYER_MULTI_SOT_RATE` (0.88), `CARD_LATE_RATE` (0.65), plus the goal-timing window fractions. These are estimates — tune them as knockout results accrue.
+Knockout base-rate priors (deliberately not shrunk): `RED_CARD_RATE` (0.118, from 2026 WC 0.125 avg), `SUB_SCORES_RATE` (0.18), `SUB_BEFORE_HALF_RATE` (0.16), `ANY_PLAYER_BRACE_RATE` (0.20), `ANY_PLAYER_MULTI_SOT_RATE` (0.88), `CARD_LATE_RATE` (0.65), `GK_SAVES_FROM_SOT` (0.70), plus the goal-timing window fractions and `TOTAL_SUBS_RATES` lookup table. Tune as knockout results accrue.
 
 ---
 
@@ -299,10 +308,12 @@ Knockout base-rate priors (also in `bot/submit.py`, deliberately not shrunk): `R
 
 - All unit tests pass (`python3 -m pytest tests/`)
 - 50/50 group-stage matches resolve to betting odds (FIFA code + alias resolution)
-- ~100% of market questions parse to a real type — group stage and Round of 32 both verified zero `unknown` via `dump_questions.py`
-- Predictions span deciles 10–70 (properly calibrated, not all 50)
+- ~100% of market questions parse to a real type — group stage, Round of 32, and Round of 16 all verified zero `unknown` via `dump_questions.py`
+- +617 RBP across 240 forecasts in Round of 32 (top 36% of users)
+- Elite calibration — prediction bands track actual hit rates from 1% through 99%
 - 485 predictions successfully PATCHed in a complete run (June 17, 2026)
 - 429s auto-retry — run is self-healing end to end
 - Lineup polling live in the scheduler (15-min cadence, 90-min pre-kickoff window)
-- Rate limiter is a sliding-window log: hard guarantee of ≤ capacity requests per 60s window (a token bucket could burst to ~2× and breach the 60/min-per-IP cap)
+- Rate limiter is a sliding-window log: hard guarantee of ≤ capacity requests per 60s window
 - Player cache is hand-curated (api-football free tier returns no usable WC 2026 player data); the per-run lookup budget throttles only network calls, so curated entries are always used
+- Diagnostic tools (`lookup.py`, `dump_questions.py`, `calibration.py`, `player_coverage.py`, `results.py`) are read-only — they never write to the player cache

@@ -33,21 +33,20 @@ from bot.client import SportsPredictClient
 from bot.question_parser import parse_question
 from bot.submit import (
     _model_prob_for_market,
-    _shrink_to_half,
     _match_name,
     reset_player_budget,
     adjust_for_lineup,
-    PERIPHERAL_TYPES,
-    LINEUP_CHECK_INTERVAL_MINUTES,  # noqa: F401  (re-exported for scheduler)
+    LINEUP_CHECK_INTERVAL_MINUTES,
 )
 from model.ensemble import format_prediction_for_submission
 from data.fetch_odds import fetch_market_odds
 from bot.match_data import build_odds_index
 
 from config import (
-    EXTREMIZE_K,
-    PERIPHERAL_SHRINK,
-    EXTREMIZE_TYPES,
+    BINARY_TYPES,
+    HEAVY_EXTREMIZE_K,
+    HEAVY_EXTREMIZE_TYPES,
+    LIGHT_EXTREMIZE_K,
     TARGET_MATCH,
     API_KEY_ENV,
 )
@@ -92,25 +91,25 @@ def _target_match_matches(match_name):
 
 def run_model_on_market(market, odds_index):
     """
-    Match-bot variant of competition-bot's run_model_on_market.
+    Match-bot three-tier prediction strategy:
 
-    Differences:
-      - Peripheral markets keep PERIPHERAL_SHRINK (1.0 = full deviation) instead
-        of the competition-bot's 0.35 shrink toward 50.
-      - ALL market types are pushed further from 0.50 via a logit stretch
-        (extremize). No type gating — the match-bot bets on every signal it has.
+      Tier 1 (BINARY_TYPES)         → submit 1 or 99
+      Tier 2 (HEAVY_EXTREMIZE_TYPES)→ logit stretch k=2.5
+      Tier 3 (everything else)      → light logit stretch k=1.5
+
+    Tier 1 contains only types where calibration shows the model has been
+    directionally right and produced positive RBP vs crowd. Tier 3 covers
+    player markets and other types that have been unreliable.
     """
     qtype = parse_question(market.get("question", "")).get("type")
     prob = _model_prob_for_market(market, odds_index)
 
-    # Peripheral shrink override (competition-bot uses 0.35; we keep full).
-    if qtype in PERIPHERAL_TYPES:
-        prob = _shrink_to_half(prob, PERIPHERAL_SHRINK)
-
-    # Extremize all types unconditionally.
-    prob = extremize(prob, EXTREMIZE_K)
-
-    return format_prediction_for_submission(prob)
+    if qtype in BINARY_TYPES:
+        return 99 if prob > 0.50 else 1 if prob < 0.50 else 50
+    elif qtype in HEAVY_EXTREMIZE_TYPES:
+        return format_prediction_for_submission(extremize(prob, HEAVY_EXTREMIZE_K))
+    else:
+        return format_prediction_for_submission(extremize(prob, LIGHT_EXTREMIZE_K))
 
 
 def run_submission_loop():
