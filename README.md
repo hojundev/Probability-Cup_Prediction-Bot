@@ -2,7 +2,7 @@
 
 An automated forecasting bot for the [Jump Trading Probability Cup 2026](https://sportspredict.com) — a free-to-play forecasting contest during the 2026 FIFA World Cup (June 11 – July 19, 2026).
 
-The bot ingests live betting odds, player stats, and confirmed lineups, runs a blended statistical model, and submits calibrated probability predictions (1–99) across ~485 binary yes/no markets on the SportsPredict platform. Scored by **Relative Brier Points** — the goal is calibration, not just picking winners.
+The bot ingests live betting odds, player stats, and confirmed lineups, runs a blended statistical model, and submits calibrated probability predictions (1–99) across ~881 binary yes/no markets on the SportsPredict platform. Scored by **Relative Brier Points** — the goal is calibration, not just picking winners.
 
 ---
 
@@ -21,7 +21,7 @@ SportsPredict markets              →  Question parser
 
 Each full run:
 1. Discovers the Probability Cup event, joins the lobby
-2. Fetches all 49 matches and their open markets (~485 total)
+2. Fetches all open matches and their markets (~881 total across the tournament)
 3. Fetches live betting odds (cached 2h to preserve quota)
 4. Routes each market question to the right model output
 5. Blends team xG with Elo-derived strength split
@@ -86,7 +86,7 @@ python3 calibration.py             # per-type calibration (prediction vs actual)
 python3 results.py Germany         # settled results (outcome + Brier) for a match/team
 ```
 
-A full run takes ~10–15 minutes: fetching markets + PATCHing ~485 predictions at the rate-limited pace. 429s are automatically retried — the run is self-healing and will never crash from throttling.
+A full run takes ~10–15 minutes: fetching markets + PATCHing ~881 predictions at the rate-limited pace. 429s are automatically retried — the run is self-healing and will never crash from throttling.
 
 ---
 
@@ -311,7 +311,7 @@ Knockout base-rate priors (deliberately not shrunk): `RED_CARD_RATE` (0.118, fro
 - ~100% of market questions parse to a real type — group stage, Round of 32, and Round of 16 all verified zero `unknown` via `dump_questions.py`
 - +617 RBP across 240 forecasts in Round of 32 (top 36% of users)
 - Elite calibration — prediction bands track actual hit rates from 1% through 99%
-- 485 predictions successfully PATCHed in a complete run (June 17, 2026)
+- 881 predictions successfully PATCHed in a complete run (July 2026)
 - 429s auto-retry — run is self-healing end to end
 - Lineup polling live in the scheduler (15-min cadence, 90-min pre-kickoff window)
 - Rate limiter is a sliding-window log: hard guarantee of ≤ capacity requests per 60s window
