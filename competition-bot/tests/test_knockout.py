@@ -85,6 +85,12 @@ CASES = [
     ("total_goals_exact", "Will the match finish with exactly 2 total goals in regulation (90 minutes + stoppage time)?"),
     ("penalty_shootout", "Will the match be decided by a penalty shootout?"),
 
+    # --- SUI vs COL new types ---
+    ("win_both_halves", "Will either team win both halves in regulation (90 minutes + stoppage time)?"),
+    ("first_goal_second_half", "Will the first goal of the match be scored in the second half of regulation (90 minutes + stoppage time)?"),
+    ("match_decided_one_goal", "Will the match be decided by exactly one goal in regulation (90 minutes + stoppage time)?"),
+    ("card_each_half", "Will at least one card be shown in each half of regulation (90 minutes + stoppage time)?"),
+
     # --- POR vs ESP new types ---
     ("match_draw", "Will the match go to extra time?"),
     ("total_subs", "Will there be 9 or more total substitutions (both teams combined) in regulation (90 minutes + stoppage time)?"),

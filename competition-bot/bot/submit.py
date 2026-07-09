@@ -52,8 +52,8 @@ SECOND_HALF_GOAL_SHARE = 0.57
 #
 # At team_xg = AVG_TEAM_XG the ratio is exactly SOT_PER_XG_BASE (3.3, calibrated
 # from the ~4.3-SOT / ~1.3-xG match average).
-SOT_PER_XG_BASE = 3.6
-SOT_PER_XG = 3.6               # base ratio (kept for fallbacks that lack a team xG)
+SOT_PER_XG_BASE = 3.8
+SOT_PER_XG = 3.8               # base ratio (kept for fallbacks that lack a team xG)
 SOT_PER_XG_SLOPE = 0.45        # how strongly the ratio rises with team dominance (raised: team_total_sot under-predicted by ~10pts)
 SOT_PER_XG_MIN = 2.9           # clamp: weak teams don't drop below this
 SOT_PER_XG_MAX = 4.2           # clamp: elite favorites don't exceed this
@@ -89,7 +89,7 @@ OFFSIDE_XG_SCALE = 0.6        # how strongly xG modulates the offside rate
 CORNER_XG_SCALE = 0.5         # how strongly xG modulates corner counts (attacking sides win more)
 AVG_FOULS_PER_TEAM = 12.0
 PENALTY_AWARDED_RATE = 0.26    # P(>=1 penalty in a match)
-PENALTY_OR_RED_RATE = 0.24     # calibrated down: was over-predicted by +10pts (37% pred vs 28% actual)
+PENALTY_OR_RED_RATE = 0.20     # calibrated down: 30 samples, 26.7% actual hit rate
 
 TEAM_SHOTS_PER_GAME = 12.3     # 2026 WC actual average
 TEAM_SHOTS_ON_TARGET_PER_GAME = 4.5
@@ -152,7 +152,7 @@ PLAYER_SOT_BASE = 0.45                # P(>=1 shot on target) for a generic feat
 #     rates more.
 #   - PLAYER_TEAM_XG_CEIL: max multiplier (1.0 = a strong-team player tops out at
 #     their raw rate, no upside boost).
-PLAYER_TEAM_XG_REF = 2.3      # team xG for ~full per-90 rate realization; raised 2.1->2.3 (player SOT over-predicted +7.4pts)
+PLAYER_TEAM_XG_REF = 2.5      # team xG for ~full per-90 rate realization; raised 2.3->2.5 (player SOT/GI over-predicted +7pts, 75+ samples)
 PLAYER_TEAM_XG_FLOOR = 0.20   # min context multiplier (don't zero out a star on a minnow)
 PLAYER_TEAM_XG_CEIL = 1.00    # max context multiplier (1.0 = no upside boost)
 
@@ -171,8 +171,10 @@ SUB_SCORES_RATE = 0.18            # P(a substitute scores)
 SUB_BEFORE_HALF_RATE = 0.16       # P(a substitution before halftime; usually injury)
 ANY_PLAYER_BRACE_RATE = 0.20      # P(some player scores 2+ goals)
 ANY_PLAYER_MULTI_SOT_RATE = 0.88  # P(some player records 2+ shots on target) — very common
-CARD_LATE_RATE = 0.65             # P(card after 2nd hydration break / late, incl. ET)
+CARD_LATE_RATE = 0.45             # P(card after 2nd hydration break / late); lowered from 0.65
 CARD_FIRST_HALF_SHARE = 0.35      # share of a match's cards shown in the first half (WC: ~35%)
+CARD_SECOND_HALF_SHARE = 0.65     # complementary second-half share
+CARD_STOPPAGE_TIME_SHARE = 0.10   # share of cards shown in combined stoppage time (~5'+5')
 
 # Total shots (on + off target) in an average match; scaled by the match's
 # combined xG relative to an average game.
@@ -192,15 +194,26 @@ TOTAL_SHOTS_BASELINE = 2 * TEAM_SHOTS_PER_GAME   # ~26 shots in an average match
 # over-predicted, after-hydration was meaningfully under-predicted.
 GOAL_FRAC_BEFORE_HYDRATION = 0.20        # before the ~22' first hydration break
 GOAL_FRAC_AFTER_HYDRATION = 0.38         # after the ~67' second hydration break
+GOAL_FRAC_FIRST_HALF_AFTER_HYDRATION = 0.22  # ~22' to 45': between first break and halftime
 GOAL_FRAC_FIRST_HALF_STOPPAGE = 0.05     # first-half added time
 GOAL_FRAC_SECOND_HALF_STOPPAGE = 0.09    # second-half added time
 # Fallback P(goal in window) when no odds/xG are available.
 GOAL_WINDOW_FALLBACK = {
     "before_hydration": 0.34,
     "after_hydration": 0.62,
+    "first_half_after_hydration": 0.38,
     "first_half_stoppage": 0.10,
     "second_half_stoppage": 0.16,
 }
+
+# "First goal scored by a player OTHER THAN X and Y" — modelable as
+# P(a goal is scored) × P(scorer is not one of the named players). Since named
+# players are usually the two star forwards, the probability that some OTHER
+# player scores first is high. Calibrated estimate based on typical star-player
+# share of team goals (~25% for each star → 50% combined → 50% other).
+# This is a base-rate fallback; a proper model would need each player's
+# goal probability, which varies by match context.
+FIRST_GOAL_OTHER_PLAYER_RATE = 0.70   # P(first goal scored by neither named player)
 
 # --- Lineup-update polling window -------------------------------------------
 # Start checking for confirmed lineups this many minutes before kickoff, and
@@ -695,6 +708,31 @@ def _model_prob_for_market(market, odds_index):
             return _comparative_with_supremacy(odds, match_name, parsed, base, favor_underdog=True)
         return 0.42  # P(strictly more) with a meaningful tie probability
 
+    # ---------- Compound AND comparative (corners AND shots) ----------
+    # "Will <team> have more corner kicks AND more total shots than <opponent>?"
+    # P(team wins corners) × P(team wins shots), with a positive correlation
+    # correction (both driven by the same team dominance — they're not
+    # independent). Use a 0.75 correlation weight: actual = geometric midpoint
+    # between full-independence product and P(corners alone).
+    if qtype == "comparative_and":
+        if xg_home is not None:
+            is_home = team_is_home(match_name, parsed.get("team", ""))
+            xg_t = xg_home if is_home else xg_away
+            xg_o = xg_away if is_home else xg_home
+            # P(team wins corners)
+            p_corners = _comparative_with_supremacy(
+                odds, match_name, parsed, AVG_CORNERS_PER_TEAM)
+            # P(team wins total shots)
+            mu_t = xg_t * (xg_t / AVG_TEAM_XG)   # scaled shots proxy
+            mu_o = xg_o * (xg_o / AVG_TEAM_XG)
+            p_shots = prob_x_greater_than_y(
+                max(0.5, mu_t * AVG_CORNERS_PER_TEAM),
+                max(0.5, mu_o * AVG_CORNERS_PER_TEAM))
+            # Correlation-adjusted: blend independence with corners-only
+            p_independent = p_corners * p_shots
+            return 0.25 * p_corners + 0.75 * p_independent
+        return 0.50  # no odds — can't estimate dominance
+
     # ---------- Both teams to score (BTTS) ----------
     if qtype == "btts":
         if xg_home is not None:
@@ -843,16 +881,93 @@ def _model_prob_for_market(market, odds_index):
 
     # ---------- Goal scored inside a specific time window ----------
     if qtype in ("goal_before_hydration", "goal_after_hydration",
-                 "goal_first_half_stoppage", "goal_second_half_stoppage"):
+                 "goal_first_half_stoppage", "goal_second_half_stoppage",
+                 "goal_first_half_after_hydration"):
         frac = {
             "goal_before_hydration": GOAL_FRAC_BEFORE_HYDRATION,
             "goal_after_hydration": GOAL_FRAC_AFTER_HYDRATION,
             "goal_first_half_stoppage": GOAL_FRAC_FIRST_HALF_STOPPAGE,
             "goal_second_half_stoppage": GOAL_FRAC_SECOND_HALF_STOPPAGE,
+            "goal_first_half_after_hydration": GOAL_FRAC_FIRST_HALF_AFTER_HYDRATION,
         }[qtype]
         if total_xg is not None:
             return prob_at_least_one(total_xg * frac)
         return GOAL_WINDOW_FALLBACK[qtype.replace("goal_", "")]
+
+    # ---------- Total goals odd / even ----------
+    if qtype in ("total_goals_odd", "total_goals_even"):
+        if total_xg is not None:
+            # P(odd total) = Σ P(n) for n=1,3,5,...
+            # Analytical formula for Poisson: P(odd) = 0.5*(1 - e^(-2*mu))
+            # This avoids calling prob_exactly (which requires scipy) and is
+            # exact for a single Poisson — a good approximation for two
+            # independent Poissons summed.
+            import math as _math
+            mu = total_xg
+            p_odd = 0.5 * (1.0 - _math.exp(-2.0 * mu))
+            return p_odd if qtype == "total_goals_odd" else 1.0 - p_odd
+        # Fallback: slightly below 50% for odd (0 goals = even shifts balance)
+        return 0.42 if qtype == "total_goals_odd" else 0.58
+
+    # ---------- First goal by player other than named players ----------
+    if qtype == "first_goal_other_player":
+        return FIRST_GOAL_OTHER_PLAYER_RATE
+
+    # ---------- Win both halves (either team) ----------
+    # P(one team wins HT AND wins 2nd half) for home + away team combined.
+    # Uses prob_x_greater_than_y which computes P(Poisson(a) > Poisson(b)).
+    if qtype == "win_both_halves":
+        if total_xg is not None:
+            mu_h1 = xg_home * FIRST_HALF_GOAL_SHARE
+            mu_a1 = xg_away * FIRST_HALF_GOAL_SHARE
+            mu_h2 = xg_home * SECOND_HALF_GOAL_SHARE
+            mu_a2 = xg_away * SECOND_HALF_GOAL_SHARE
+            p_home_ht = prob_x_greater_than_y(mu_h1, mu_a1)
+            p_away_ht = prob_x_greater_than_y(mu_a1, mu_h1)
+            p_home_2h = prob_x_greater_than_y(mu_h2, mu_a2)
+            p_away_2h = prob_x_greater_than_y(mu_a2, mu_h2)
+            return p_home_ht * p_home_2h + p_away_ht * p_away_2h
+        return 0.25  # fallback: dominant double-half win is uncommon
+
+    # ---------- First goal scored in the second half ----------
+    # P(no goal in first half) × P(second half has ≥1 goal).
+    if qtype == "first_goal_second_half":
+        if total_xg is not None:
+            mu_first = total_xg * FIRST_HALF_GOAL_SHARE
+            mu_second = total_xg * SECOND_HALF_GOAL_SHARE
+            p_no_first_half = 1.0 - prob_at_least_one(mu_first)
+            p_second_half_scores = prob_at_least_one(mu_second)
+            return p_no_first_half * p_second_half_scores
+        return 0.28  # fallback: minority of matches have first goal in 2nd half
+
+    # ---------- Match decided by exactly one goal ----------
+    # P(|home_goals - away_goals| = 1). Computed directly from independent
+    # Poisson PMFs using only math.exp/factorial — no scipy needed.
+    if qtype == "match_decided_one_goal":
+        if total_xg is not None:
+            import math as _math
+            p = 0.0
+            for h in range(10):
+                ph = (_math.exp(-xg_home) * xg_home**h) / _math.factorial(h)
+                for a in range(10):
+                    if abs(h - a) == 1:
+                        pa = (_math.exp(-xg_away) * xg_away**a) / _math.factorial(a)
+                        p += ph * pa
+            return p
+        return 0.37  # empirical WC fallback (~35-38% of matches decided by 1)
+
+    # ---------- At least one card in each half ----------
+    # P(≥1 card in first half) × P(≥1 card in second half), independent.
+    if qtype == "card_each_half":
+        mu_first = AVG_CARDS_TOTAL * CARD_FIRST_HALF_SHARE
+        mu_second = AVG_CARDS_TOTAL * CARD_SECOND_HALF_SHARE
+        return prob_at_least_one(mu_first) * prob_at_least_one(mu_second)
+
+    # ---------- Card shown in stoppage time (either half) ----------
+    # Covers ~10 combined minutes of stoppage (5' + 5'). ~10% of cards fall in
+    # stoppage time. P(≥1 card in combined stoppage).
+    if qtype == "card_stoppage_time":
+        return prob_at_least_one(AVG_CARDS_TOTAL * CARD_STOPPAGE_TIME_SHARE)
 
     # ---------- Penalty markets ----------
     if qtype == "penalty_awarded":

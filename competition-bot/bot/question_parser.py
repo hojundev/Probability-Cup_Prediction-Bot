@@ -222,6 +222,9 @@ def parse_question(question: str) -> dict:
             return {"type": "goal_first_half_stoppage"}
         if "second-half stoppage" in q or "second half stoppage" in q:
             return {"type": "goal_second_half_stoppage"}
+        # "in the first half after the first hydration break" — window ~22'-45'
+        if "first half" in q and "after the first hydration break" in q:
+            return {"type": "goal_first_half_after_hydration"}
 
     # ---- Half vs half goals comparison -------------------------------------
     # "Will the second half have/produce more goals than the first half?"
@@ -341,6 +344,32 @@ def parse_question(question: str) -> dict:
     if mb:
         return {"type": "team_win_by_margin", "team": _title(mb.group(1)), "margin": int(mb.group(2))}
 
+    # ---- Win both halves (knockout) ----------------------------------------
+    # "Will either team win both halves?" — a distinct market from match_winner.
+    # Must come before the generic "win" branch below.
+    if "win both halves" in q:
+        return {"type": "win_both_halves"}
+
+    # ---- First goal in second half (knockout) ------------------------------
+    # "Will the first goal be scored in the second half?"
+    if "first goal" in q and "second half" in q and "other than" not in q:
+        return {"type": "first_goal_second_half"}
+
+    # ---- Match decided by exactly one goal (knockout) ----------------------
+    # "Will the match be decided by exactly one goal?"
+    if ("decided by" in q and "one goal" in q) or ("exactly one goal" in q and "decided" in q):
+        return {"type": "match_decided_one_goal"}
+
+    # ---- Card shown in each half (knockout) --------------------------------
+    # "Will at least one card be shown in each half?"
+    if "card" in q and "each half" in q:
+        return {"type": "card_each_half"}
+
+    # ---- Card shown in stoppage time (knockout) ----------------------------
+    # "Will a card be shown during first- or second-half stoppage time?"
+    if "card" in q and "stoppage time" in q and "total" not in q:
+        return {"type": "card_stoppage_time"}
+
     # ---- Match winner ------------------------------------------------------
     # "Will <team> win the match?" / "Will <team> win [in regulation]?"
     if "win the match" in q or re.search(r"will\s+.+?\s+win\b", q):
@@ -447,6 +476,27 @@ def parse_question(question: str) -> dict:
     if ("penalty shootout" in q or ("penalty" in q and "shootout" in q)):
         if "excluding" not in q and "decided by" in q:
             return {"type": "penalty_shootout"}
+
+    # ---- Total goals odd/even (knockout) -----------------------------------
+    # "Will the total number of goals be an odd number?"
+    if "total" in q and "goals" in q and "odd" in q:
+        return {"type": "total_goals_odd"}
+    if "total" in q and "goals" in q and "even" in q:
+        return {"type": "total_goals_even"}
+
+    # ---- First goal by a player other than named players -------------------
+    # "Will the first goal be scored by a player other than X and Y?"
+    if "first goal" in q and "other than" in q and "player" in q:
+        return {"type": "first_goal_other_player"}
+
+    # ---- Compound AND comparative (e.g. "more X AND more Y than opponent") --
+    # "Will England have more corner kicks AND more total shots than Norway?"
+    # Models as P(A wins metric1) × P(A wins metric2) with positive correlation
+    # adjustment (both driven by same team dominance), applied before falling
+    # through to unknown.
+    if " and " in q and "more" in q and "than" in q and "corner" in q and "shot" in q:
+        m = re.search(r"will\s+" + _TEAM_RE + r"\s+have more", q)
+        return {"type": "comparative_and", "team": _title(m.group(1)) if m else "Unknown"}
 
     # ---- Total goals over/under -------------------------------------------
     if "total goals" in q:
