@@ -225,6 +225,10 @@ def parse_question(question: str) -> dict:
         # "in the first half after the first hydration break" — window ~22'-45'
         if "first half" in q and "after the first hydration break" in q:
             return {"type": "goal_first_half_after_hydration"}
+        # "after the first hydration break but before the second hydration break"
+        # — window ~22' to ~67', the middle portion of the match
+        if "after the first hydration break" in q and "before the second hydration break" in q:
+            return {"type": "goal_between_breaks"}
 
     # ---- Half vs half goals comparison -------------------------------------
     # "Will the second half have/produce more goals than the first half?"
@@ -256,6 +260,9 @@ def parse_question(question: str) -> dict:
     # ---- Halftime markets --------------------------------------------------
     if "halftime" in q or "at halftime" in q:
         if "be tied" in q or "match be tied" in q:
+            return {"type": "halftime_tied"}
+        # "Will the match be 0-0 at halftime?" — explicit scoreline, same as tied
+        if re.search(r"0.?0\s+at\s+halftime|halftime.*0.?0", q):
             return {"type": "halftime_tied"}
         if "both teams have at least" in q and "shot on target" in q:
             return {"type": "halftime_both_sot"}
@@ -349,6 +356,18 @@ def parse_question(question: str) -> dict:
     # Must come before the generic "win" branch below.
     if "win both halves" in q:
         return {"type": "win_both_halves"}
+
+    # ---- Team holds a lead at any point (knockout) -------------------------
+    # "Will Belgium hold a lead at any point?" is equivalent to "Will Belgium
+    # score at least once?" — if they score, they were ahead at some point.
+    # "excluding penalty shootout" is a qualifier, not a separate market.
+    if "hold a lead" in q:
+        m = re.search(r"will\s+" + _TEAM_RE + r"\s+hold a lead", q)
+        return {"type": "team_score", "team": _title(m.group(1)) if m else "Unknown"}
+
+    # ---- Substitution at halftime (knockout) --------------------------------
+    if "substitution" in q and "halftime" in q:
+        return {"type": "sub_at_halftime"}
 
     # ---- First goal in second half (knockout) ------------------------------
     # "Will the first goal be scored in the second half?"
@@ -476,6 +495,22 @@ def parse_question(question: str) -> dict:
     if ("penalty shootout" in q or ("penalty" in q and "shootout" in q)):
         if "excluding" not in q and "decided by" in q:
             return {"type": "penalty_shootout"}
+
+    # ---- VAR review (knockout) -----------------------------------------------
+    # "Will the referee conduct an on-field review at the pitchside VAR monitor?"
+    if "var" in q or "pitchside" in q or ("on-field review" in q and "referee" in q):
+        return {"type": "var_review"}
+
+    # ---- First substitution by a specific team (knockout) ------------------
+    # "Will Spain make the first substitution of the match?"
+    if "first substitution" in q and "make" in q:
+        m = re.search(r"will\s+" + _TEAM_RE + r"\s+make the first substitution", q)
+        return {"type": "first_sub", "team": _title(m.group(1)) if m else "Unknown"}
+
+    # ---- First goal by single-digit shirt number (knockout) ----------------
+    # "Will the first goal be scored by a player wearing a single-digit shirt number?"
+    if "single-digit" in q and "shirt number" in q:
+        return {"type": "first_goal_single_digit_shirt"}
 
     # ---- Total goals odd/even (knockout) -----------------------------------
     # "Will the total number of goals be an odd number?"

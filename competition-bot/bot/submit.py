@@ -89,7 +89,7 @@ OFFSIDE_XG_SCALE = 0.6        # how strongly xG modulates the offside rate
 CORNER_XG_SCALE = 0.5         # how strongly xG modulates corner counts (attacking sides win more)
 AVG_FOULS_PER_TEAM = 12.0
 PENALTY_AWARDED_RATE = 0.26    # P(>=1 penalty in a match)
-PENALTY_OR_RED_RATE = 0.20     # calibrated down: 30 samples, 26.7% actual hit rate
+PENALTY_OR_RED_RATE = 0.24     # reverted from 0.20: 34 samples, actual ~29%, crowd consistently higher
 
 TEAM_SHOTS_PER_GAME = 12.3     # 2026 WC actual average
 TEAM_SHOTS_ON_TARGET_PER_GAME = 4.5
@@ -114,10 +114,24 @@ ELO = load_wc2026_ratings()
 TEAM_AVG_PLAYERS_SHOOTING = 4.0
 TEAM_AVG_GOAL_SCORERS = 2.5
 PLAYER_ASSIST_RATE = 0.15      # share of team xG attributable to one player's assists
-# Club xA rates over-state assist probability in tight WC knockout matches —
-# playmakers create fewer clear chances under defensive pressure. This multiplier
-# deflates the xA path in player_goal_involvement without touching the goal path.
-PLAYER_XA_WC_FACTOR = 0.55    # WC conservatism on xA: lowered 0.70->0.55 (player_goal_involvement over-predicted +6.3pts)
+# Club xA rates don't translate uniformly to WC knockout football. Research
+# shows elite creative players (high club xA) actually INCREASE their assist
+# output at the WC (more space, better teammates, opposition focused on stopping
+# them as scorers), while standard players see their xA crater (tighter defences,
+# lower tempo). We model this as a quality-dependent multiplier that scales
+# linearly from PLAYER_XA_WC_LOW (for xA_per_90 ≈ 0) up to PLAYER_XA_WC_HIGH
+# (for xA_per_90 ≥ PLAYER_XA_WC_REF_RATE), clamped at the high end.
+#
+#   factor = PLAYER_XA_WC_LOW + (PLAYER_XA_WC_HIGH - PLAYER_XA_WC_LOW)
+#            × clamp(xA_per_90 / PLAYER_XA_WC_REF_RATE, 0, 1)
+#
+# Calibration targets:
+#   xA=0.10 (deep defenders): factor ≈ 0.52 — heavy deflation
+#   xA=0.30 (standard midfielders): factor ≈ 0.72
+#   xA=0.50+ (elite playmakers, De Bruyne, Bruno, Ødegaard): factor ≈ 1.10+
+PLAYER_XA_WC_LOW = 0.45         # WC factor for players with near-zero club xA
+PLAYER_XA_WC_HIGH = 1.15        # WC factor for elite playmakers (xA ≥ REF_RATE)
+PLAYER_XA_WC_REF_RATE = 0.50    # xA/90 at which the high factor is reached
 MIN_REAL_STAT = 0.01           # below this a "real" per-90 stat is treated as a miss
 MIN_CONVERSION_RATE = 0.04    # floor for conversion_rate in goal-involvement model;
                                # players with conversion_rate: 0 use this so their
@@ -154,7 +168,7 @@ PLAYER_SOT_BASE = 0.45                # P(>=1 shot on target) for a generic feat
 #     their raw rate, no upside boost).
 PLAYER_TEAM_XG_REF = 2.5      # team xG for ~full per-90 rate realization; raised 2.3->2.5 (player SOT/GI over-predicted +7pts, 75+ samples)
 PLAYER_TEAM_XG_FLOOR = 0.20   # min context multiplier (don't zero out a star on a minnow)
-PLAYER_TEAM_XG_CEIL = 1.00    # max context multiplier (1.0 = no upside boost)
+PLAYER_TEAM_XG_CEIL = 0.80    # max context multiplier; lowered 1.0->0.80 to stop strong-team players being over-boosted (Messi 78%->~67%)
 
 # Player markets for absent/benched players are slashed to this fraction of the
 # starter probability once confirmed lineups are in (see lineup updates).
@@ -195,6 +209,7 @@ TOTAL_SHOTS_BASELINE = 2 * TEAM_SHOTS_PER_GAME   # ~26 shots in an average match
 GOAL_FRAC_BEFORE_HYDRATION = 0.20        # before the ~22' first hydration break
 GOAL_FRAC_AFTER_HYDRATION = 0.38         # after the ~67' second hydration break
 GOAL_FRAC_FIRST_HALF_AFTER_HYDRATION = 0.22  # ~22' to 45': between first break and halftime
+GOAL_FRAC_BETWEEN_BREAKS = 0.57             # ~22' to ~67': middle portion of the match
 GOAL_FRAC_FIRST_HALF_STOPPAGE = 0.05     # first-half added time
 GOAL_FRAC_SECOND_HALF_STOPPAGE = 0.09    # second-half added time
 # Fallback P(goal in window) when no odds/xG are available.
@@ -202,6 +217,7 @@ GOAL_WINDOW_FALLBACK = {
     "before_hydration": 0.34,
     "after_hydration": 0.62,
     "first_half_after_hydration": 0.38,
+    "between_breaks": 0.77,
     "first_half_stoppage": 0.10,
     "second_half_stoppage": 0.16,
 }
@@ -214,6 +230,17 @@ GOAL_WINDOW_FALLBACK = {
 # This is a base-rate fallback; a proper model would need each player's
 # goal probability, which varies by match context.
 FIRST_GOAL_OTHER_PLAYER_RATE = 0.70   # P(first goal scored by neither named player)
+
+# VAR on-field review: high-stakes knockout matches have frequent pitchside
+# checks (~65% of QF/SF matches).
+VAR_REVIEW_RATE = 0.65
+
+# First substitution: roughly 50% either team makes it first in an even match.
+FIRST_SUB_RATE = 0.50
+
+# First goal scored by single-digit shirt number (1-9): ~9 outfield single-digit
+# numbers out of ~22 outfielders (GK rarely scores) ≈ 43%.
+FIRST_GOAL_SINGLE_DIGIT_SHIRT_RATE = 0.43
 
 # --- Lineup-update polling window -------------------------------------------
 # Start checking for confirmed lineups this many minutes before kickoff, and
@@ -406,16 +433,38 @@ def _real_player_stats(player_name):
 
 def _player_team_context(player, match_name, xg_home, xg_away):
     """
-    The SOLE adjustment to a player's rate: how strong their team is expected to
-    be in this match, as team_xg / PLAYER_TEAM_XG_REF (clamped). Weak/underdog
-    teams scale their players down; strong teams sit near their full rate. When
-    the team or match xG can't be resolved (no odds, or player not in the squad
-    cache) we assume an average team.
+    Context multiplier on a player's per-90 rate: how strong their team is
+    relative to the MATCH average (not a fixed tournament-wide reference).
+
+    Using the match average as the reference means:
+    - Both teams in an evenly-matched game get context ~1.0 (full club rate)
+    - The underdog in a lopsided match gets proportional deflation
+    - QF/SF underdogs (e.g. Norway vs England) get less deflation than
+      group-stage minnows because the match average is higher
+
+    Falls back to AVG_TEAM_XG as the reference when no odds are available.
     """
     team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
     if team_xg is None:
         team_xg = AVG_TEAM_XG
-    return max(PLAYER_TEAM_XG_FLOOR, min(PLAYER_TEAM_XG_CEIL, team_xg / PLAYER_TEAM_XG_REF))
+    # Reference = this match's per-team xG average (both teams combined / 2)
+    if xg_home is not None and xg_away is not None:
+        reference = (xg_home + xg_away) / 2.0
+    else:
+        reference = AVG_TEAM_XG
+    reference = max(reference, 0.5)  # sanity floor so we never divide by ~0
+    return max(PLAYER_TEAM_XG_FLOOR, min(PLAYER_TEAM_XG_CEIL, team_xg / reference))
+
+
+def _player_xa_wc_factor(xa_per_90: float) -> float:
+    """
+    Quality-dependent xA WC factor. Elite playmakers (high club xA) generate
+    MORE assists at the WC than their club rate suggests; standard players
+    generate fewer. Scales linearly from PLAYER_XA_WC_LOW (at xA ≈ 0) to
+    PLAYER_XA_WC_HIGH (at xA ≥ PLAYER_XA_WC_REF_RATE).
+    """
+    t = min(1.0, xa_per_90 / PLAYER_XA_WC_REF_RATE) if PLAYER_XA_WC_REF_RATE > 0 else 0.0
+    return PLAYER_XA_WC_LOW + (PLAYER_XA_WC_HIGH - PLAYER_XA_WC_LOW) * t
 
 
 def _player_sot_prob(player, threshold, half, match_name, xg_home, xg_away):
@@ -611,14 +660,15 @@ def _model_prob_for_market(market, odds_index):
             conv = max(MIN_CONVERSION_RATE, stats.get("conversion_rate", 0.0))
             player_xg = stats["shots_per_90"] * conv * context
             p_goal = prob_at_least_one(player_xg)
-            p_assist = prob_at_least_one(stats.get("xA_per_90", 0.0) * context * PLAYER_XA_WC_FACTOR)
+            xa = stats.get("xA_per_90", 0.0)
+            p_assist = prob_at_least_one(xa * context * _player_xa_wc_factor(xa))
         else:
             # No real stats: team-xG-derived estimate (already team-scaled).
             team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
             if team_xg is None:
                 return PLAYER_GOAL_INVOLVEMENT_BASE   # no information
             p_goal = prob_at_least_one(team_xg / TEAM_AVG_GOAL_SCORERS)
-            p_assist = prob_at_least_one(team_xg * PLAYER_ASSIST_RATE * PLAYER_XA_WC_FACTOR)
+            p_assist = prob_at_least_one(team_xg * PLAYER_ASSIST_RATE * PLAYER_XA_WC_LOW)
         return 1 - (1 - p_goal) * (1 - p_assist)
 
     # ---------- Team total shots on target ----------
@@ -871,6 +921,11 @@ def _model_prob_for_market(market, odds_index):
     if qtype == "sub_before_half":
         return SUB_BEFORE_HALF_RATE
 
+    # ---------- A substitution at halftime ----------
+    # Tactical/injury halftime subs happen in roughly 35% of matches.
+    if qtype == "sub_at_halftime":
+        return 0.35
+
     # ---------- Any player records 2+ shots on target ----------
     if qtype == "any_player_sot":
         return ANY_PLAYER_MULTI_SOT_RATE
@@ -882,13 +937,14 @@ def _model_prob_for_market(market, odds_index):
     # ---------- Goal scored inside a specific time window ----------
     if qtype in ("goal_before_hydration", "goal_after_hydration",
                  "goal_first_half_stoppage", "goal_second_half_stoppage",
-                 "goal_first_half_after_hydration"):
+                 "goal_first_half_after_hydration", "goal_between_breaks"):
         frac = {
             "goal_before_hydration": GOAL_FRAC_BEFORE_HYDRATION,
             "goal_after_hydration": GOAL_FRAC_AFTER_HYDRATION,
             "goal_first_half_stoppage": GOAL_FRAC_FIRST_HALF_STOPPAGE,
             "goal_second_half_stoppage": GOAL_FRAC_SECOND_HALF_STOPPAGE,
             "goal_first_half_after_hydration": GOAL_FRAC_FIRST_HALF_AFTER_HYDRATION,
+            "goal_between_breaks": GOAL_FRAC_BETWEEN_BREAKS,
         }[qtype]
         if total_xg is not None:
             return prob_at_least_one(total_xg * frac)
@@ -912,6 +968,18 @@ def _model_prob_for_market(market, odds_index):
     # ---------- First goal by player other than named players ----------
     if qtype == "first_goal_other_player":
         return FIRST_GOAL_OTHER_PLAYER_RATE
+
+    # ---------- VAR on-field review ----------
+    if qtype == "var_review":
+        return VAR_REVIEW_RATE
+
+    # ---------- First substitution by a specific team ----------
+    if qtype == "first_sub":
+        return FIRST_SUB_RATE
+
+    # ---------- First goal by single-digit shirt number ----------
+    if qtype == "first_goal_single_digit_shirt":
+        return FIRST_GOAL_SINGLE_DIGIT_SHIRT_RATE
 
     # ---------- Win both halves (either team) ----------
     # P(one team wins HT AND wins 2nd half) for home + away team combined.
