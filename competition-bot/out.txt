@@ -1,0 +1,9 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.13.9, pytest-8.4.2, pluggy-1.5.0
+rootdir: /Users/jun/Desktop/Personal_Project/ProbabilityCup/competition-bot
+plugins: hypothesis-6.155.3, anyio-4.10.0
+collected 40 items
+
+tests/test_knockout.py ....                                              [ 10%]
+tests/test_model.py ....................                                 [ 60%]
+tests/test_rate_limiter.py .............

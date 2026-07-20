@@ -271,7 +271,7 @@ def test_player_goal_question_parses_as_player():
     # Regression: "score a goal (excluding own goals)" must route to the player
     # model, not team_score (which previously treated the player as a team).
     p = parse_question("Will Salem Al-Dawsari score a goal (excluding own goals)?")
-    assert p["type"] == "player_goal_involvement"
+    assert p["type"] == "player_goal"   # pure goal market (no assist term)
     assert p["player"] == "Salem Al-Dawsari"
     # A plain team-scoring question must still parse as team_score.
     p2 = parse_question("Will Saudi Arabia score a goal?")
@@ -331,13 +331,15 @@ def test_elo_xg_adjustment_conserves_total():
 
 def test_player_market_no_team_no_stats_is_conservative():
     # When the player's team can't be resolved (no squad cache) and there are no
-    # real stats, the player market must fall back to a conservative prior near
-    # 50 — never an extreme value like crediting a weak-team player at 60+.
+    # real stats, the player market must fall back to a conservative prior —
+    # never an extreme value like crediting a weak-team player at 60+.
+    # "score a goal" routes to the pure-goal model (player_goal), whose no-info
+    # fallback is PLAYER_GOAL_INVOLVEMENT_BASE * PLAYER_GOAL_WC_FACTOR ≈ 0.20.
     index = build_odds_index(SAMPLE_ODDS)
     pred = run_model_on_market(
         {"id": "p", "question": "Will Some Unknownplayer score a goal (excluding own goals)?",
          "match": {"name": "Mexico vs South Africa"}}, index)
-    assert 25 <= pred <= 45  # shrunk base rate, not an extreme
+    assert 15 <= pred <= 45  # conservative base rate, not an extreme
 
 if __name__ == "__main__":
     print("Running tests...")

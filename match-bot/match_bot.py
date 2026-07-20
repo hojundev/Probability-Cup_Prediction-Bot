@@ -91,25 +91,47 @@ def _target_match_matches(match_name):
 
 def run_model_on_market(market, odds_index):
     """
-    Match-bot three-tier prediction strategy:
+    Match-bot — three-tier extremization strategy.
 
-      Tier 1 (BINARY_TYPES)         → submit 1 or 99
-      Tier 2 (HEAVY_EXTREMIZE_TYPES)→ logit stretch k=2.5
-      Tier 3 (everything else)      → light logit stretch k=1.5
+    The goal is to win a single match's leaderboard, which rewards being
+    confident and right rather than well-calibrated. Markets are dispatched by
+    type into three tiers (see config.py):
 
-    Tier 1 contains only types where calibration shows the model has been
-    directionally right and produced positive RBP vs crowd. Tier 3 covers
-    player markets and other types that have been unreliable.
+      Tier 1 (BINARY_TYPES):        submit 1 or 99 — go all-in where the model
+                                    has been directionally correct with positive
+                                    RBP vs the crowd.
+      Tier 2 (HEAVY_EXTREMIZE_TYPES): strong logit stretch (HEAVY_EXTREMIZE_K).
+      Tier 3 (everything else):     light logit stretch (LIGHT_EXTREMIZE_K).
+
+    Two exceptions bypass the tiers:
+      - unknown types / exact coin flips stay at 50 (no edge).
+      - player_goal ("<player> score a goal") is played conservatively at the
+        model's calibrated probability (no stretch). Star scorers convert often
+        enough (~30-40% in knockouts) that pushing away from 50 is poor
+        risk/reward. This does NOT affect "score or assist" or SOT markets.
     """
     qtype = parse_question(market.get("question", "")).get("type")
     prob = _model_prob_for_market(market, odds_index)
 
+    # No edge on unknowns or exact coin flips.
+    if prob == 0.50 or qtype == "unknown":
+        return 50
+
+    # Conservative carve-out: pure "score a goal" player markets.
+    if qtype == "player_goal":
+        return format_prediction_for_submission(prob)
+
+    # Tier 1: binary (maximum conviction).
     if qtype in BINARY_TYPES:
-        return 99 if prob > 0.50 else 1 if prob < 0.50 else 50
-    elif qtype in HEAVY_EXTREMIZE_TYPES:
+        return 99 if prob > 0.50 else 1
+
+    # Tier 2: heavy logit stretch.
+    if qtype in HEAVY_EXTREMIZE_TYPES:
         return format_prediction_for_submission(extremize(prob, HEAVY_EXTREMIZE_K))
-    else:
-        return format_prediction_for_submission(extremize(prob, LIGHT_EXTREMIZE_K))
+
+    # Tier 3: light logit stretch (player markets, base-rate markets, and any
+    # type without enough calibration data to promote to tier 1/2).
+    return format_prediction_for_submission(extremize(prob, LIGHT_EXTREMIZE_K))
 
 
 def run_submission_loop():

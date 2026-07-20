@@ -144,6 +144,10 @@ def parse_question(question: str) -> dict:
     # "Will a penalty kick be awarded OR a red card be shown ...?"
     if "penalty kick" in q and "red card" in q:
         return {"type": "penalty_or_red_card"}
+    # "Will a penalty kick be scored?" — distinct from "awarded": awarded AND
+    # converted. Checked before the plain awarded/shootout branches.
+    if "penalty" in q and ("be scored" in q or "be converted" in q) and "shootout" not in q:
+        return {"type": "penalty_scored"}
     if "penalty kick be awarded" in q:
         return {"type": "penalty_awarded"}
 
@@ -175,11 +179,14 @@ def parse_question(question: str) -> dict:
         # Subject is a team name -> fall through to team_score handler below.
 
     # "Will <player> score a goal (excluding own goals)?"  (not "any player")
+    # This is a PURE goal market — distinct from "score or assist" above. It must
+    # NOT include an assist term, so it routes to player_goal (goal only), not
+    # player_goal_involvement.
     if "score a goal" in q and "excluding own goals" in q and "any player" not in q:
         m = re.search(r"will\s+" + _TEAM_RE + r"\s+score a goal", q)
         subject = m.group(1) if m else ""
         if not _looks_like_team(subject):
-            return {"type": "player_goal_involvement", "player": _clean_player_name(subject)}
+            return {"type": "player_goal", "player": _clean_player_name(subject)}
         # Subject is a team name -> re-route as team_score below.
 
     # "Will any player score more than 1 goal (excluding own goals)?" (a brace)
@@ -211,6 +218,23 @@ def parse_question(question: str) -> dict:
             return {"type": "player_shot_on_target", "player": _clean_player_name(subject),
                     "threshold": n or 1, "direction": direction or "over", "half": _half(q)}
 
+    # ---- Player vs player: more shots on target ----------------------------
+    # "Will <player> record more shots on target than <player>?" Two individual
+    # players (usually with (Country) tags), not teams.
+    if "more shots on target than" in q and "record" in q:
+        m = re.search(r"will\s+(.+?)\s+record more shots on target than\s+(.+?)\s*\??$", q)
+        if m and not _looks_like_team(m.group(1)) and not _looks_like_team(m.group(2)):
+            return {"type": "player_vs_player_sot",
+                    "player": _clean_player_name(m.group(1)),
+                    "opponent": _clean_player_name(m.group(2))}
+
+    # ---- N+ distinct players from one team take a shot ---------------------
+    # "Will 5 or more different <team> players attempt a shot?"
+    if "different" in q and "player" in q and ("attempt a shot" in q or "take a shot" in q
+                                               or "attempt a shot" in q or "have a shot" in q):
+        n, direction = _threshold(q)
+        return {"type": "distinct_shooters", "threshold": n or 5, "direction": direction or "over"}
+
     # ---- Goal in a specific time window ------------------------------------
     # "Will a goal be scored before the first hydration break / in stoppage time?"
     if "goal be scored" in q or ("goal" in q and "scored" in q):
@@ -218,6 +242,15 @@ def parse_question(question: str) -> dict:
             return {"type": "goal_before_hydration"}
         if "after the second hydration break" in q or "after second hydration break" in q:
             return {"type": "goal_after_hydration"}
+        # "during first- or second-half stoppage time" — covers BOTH halves'
+        # added time. Must be checked before the single-half branches, since
+        # "second-half stoppage" is a substring of this combined phrase.
+        if "stoppage" in q and (
+            "first- or second" in q or "second- or first" in q
+            or ("first half" in q and "second half" in q)
+            or ("first-half stoppage" in q and "second-half stoppage" in q)
+        ):
+            return {"type": "goal_stoppage_time"}
         if "first-half stoppage" in q or "first half stoppage" in q:
             return {"type": "goal_first_half_stoppage"}
         if "second-half stoppage" in q or "second half stoppage" in q:
@@ -266,9 +299,12 @@ def parse_question(question: str) -> dict:
             return {"type": "halftime_tied"}
         if "both teams have at least" in q and "shot on target" in q:
             return {"type": "halftime_both_sot"}
-        # "be winning" / "be ahead" / "be leading" at halftime.
-        if "be winning" in q or "be ahead" in q or "be leading" in q:
-            m = re.search(r"will\s+" + _TEAM_RE + r"\s+be (?:winning|ahead|leading)", q)
+        # "<team> be winning/ahead/leading" and bare-verb phrasings
+        # ("<team> lead/leads/leading" or "<team> win/wins/winning") at halftime.
+        if re.search(r"\b(?:be\s+)?(?:winning|ahead|leading|lead|leads|win|wins)\b", q):
+            m = re.search(
+                r"will\s+" + _TEAM_RE +
+                r"\s+(?:be\s+)?(?:winning|ahead|leading|lead|leads|win|wins)\b", q)
             return {"type": "halftime_winning", "team": _title(m.group(1)) if m else "Unknown"}
 
     # ---- Regulation ends in a draw (knockout) ------------------------------
@@ -304,6 +340,12 @@ def parse_question(question: str) -> dict:
     if "advance to" in q or "advance past" in q or "qualify for" in q:
         m = re.search(r"will\s+" + _TEAM_RE + r"\s+(?:advance|qualify)", q)
         return {"type": "team_advance", "team": _title(m.group(1)) if m else "Unknown"}
+
+    # ---- First goal is credited with an assist -----------------------------
+    # "Will the first goal of the match be credited with an assist?"
+    if "first goal" in q and "assist" in q and (
+            "credited" in q or "with an assist" in q or "have an assist" in q):
+        return {"type": "first_goal_assisted"}
 
     # ---- First goal --------------------------------------------------------
     # "Will <team> score the first goal of the (match/second half)?"
@@ -384,16 +426,40 @@ def parse_question(question: str) -> dict:
     if "card" in q and "each half" in q:
         return {"type": "card_each_half"}
 
+    # ---- Goal scored in each half (knockout) -------------------------------
+    # "Will at least one goal be scored in each half?" — goals analogue of
+    # card_each_half. P(≥1 goal 1H) × P(≥1 goal 2H).
+    if "goal" in q and "each half" in q:
+        return {"type": "goal_each_half"}
+
     # ---- Card shown in stoppage time (knockout) ----------------------------
     # "Will a card be shown during first- or second-half stoppage time?"
     if "card" in q and "stoppage time" in q and "total" not in q:
         return {"type": "card_stoppage_time"}
+
+    # ---- Win the trophy (final): includes extra time + penalties -----------
+    # "Will <team> win the World Cup / the final / the tournament / the title /
+    # lift the trophy / be crowned champions?" A regulation draw is still
+    # resolved via ET/penalties, so this is NOT the regulation-only match_winner.
+    if ("win the world cup" in q or "win the final" in q or "win the tournament" in q
+            or "win the title" in q or "lift the trophy" in q or "be crowned" in q):
+        m = re.search(r"will\s+" + _TEAM_RE + r"\s+(?:win|lift|be crowned)", q)
+        return {"type": "match_winner_incl_et", "team": _title(m.group(1)) if m else "Unknown"}
 
     # ---- Match winner ------------------------------------------------------
     # "Will <team> win the match?" / "Will <team> win [in regulation]?"
     if "win the match" in q or re.search(r"will\s+.+?\s+win\b", q):
         m = re.search(r"will\s+" + _TEAM_RE + r"\s+win", q)
         return {"type": "match_winner", "team": _title(m.group(1)) if m else "Unknown"}
+
+    # ---- Each team records N+ shots on target (joint, full match) ----------
+    # "Will each team record 4 or more shots on target?" — a joint market:
+    # P(home >= N SOT) x P(away >= N SOT). The halftime version ("both teams ...
+    # at halftime") is handled earlier in the halftime block.
+    if ("shots on target" in q or "shot on target" in q) and (
+            "each team" in q or "both teams" in q) and "than" not in q:
+        n, direction = _threshold(q)
+        return {"type": "both_teams_sot", "threshold": n or 1, "direction": direction or "over"}
 
     # ---- Team total shots on target (a named team) -------------------------
     # "Will <team> have 3 or more shots on target?" (players handled above; a

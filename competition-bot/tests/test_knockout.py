@@ -34,7 +34,7 @@ CASES = [
     # ARG vs CPV
     ("player_shot_on_target", "Will Lionel Messi (Argentina) have 3 or more shots on target in regulation (90 minutes + stoppage time)?"),
     ("goal_before_hydration", "Will a goal be scored before the first hydration break?"),
-    ("player_goal_involvement", "Will Lautaro Martínez (Argentina) score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
+    ("player_goal", "Will Lautaro Martínez (Argentina) score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
     ("team_clean_sheet", "Will Argentina keep a clean sheet in regulation (90 minutes + stoppage time)?"),
     ("match_winner", "Will Argentina win in regulation (90 minutes + stoppage time)?"),
     ("team_total_sot", "Will Cape Verde have 2 or more shots on target in regulation (90 minutes + stoppage time)?"),
@@ -49,7 +49,7 @@ CASES = [
     ("total_shots", "Will there be 22 or more total shots (on and off target) in regulation (90 minutes + stoppage time)?"),
 
     # AUS vs EGY
-    ("player_goal_involvement", "Will Mahmoud Trezeguet (Egypt) score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
+    ("player_goal", "Will Mahmoud Trezeguet (Egypt) score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
     ("halftime_tied", "Will the match be tied at halftime?"),
     ("total_goals", "Will the match have 2 or fewer total goals in regulation (90 minutes + stoppage time)?"),
     ("player_shot_on_target", "Will Nestory Irankunda (Australia) have 2 or more shots on target in regulation (90 minutes + stoppage time)?"),
@@ -72,7 +72,7 @@ CASES = [
     ("team_advance", "Will Japan advance to the Round of 16?"),
     ("total_corners", "Will there be 9 or more total corner kicks in regulation (90 minutes + stoppage time)?"),
     ("sub_scores", "Will a substitute score a goal in regulation (90 minutes + stoppage time)?"),
-    ("player_goal_involvement", "Will Matheus Cunha score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
+    ("player_goal", "Will Matheus Cunha score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
     ("any_player_brace", "Will any player score more than 1 goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
     ("team_offsides", "Will either team be ruled offside before the first hydration break?"),
     ("total_goals", "Will the match have 3 or more total goals in regulation (90 minutes + stoppage time)?"),
@@ -100,7 +100,7 @@ CASES = [
     ("team_score", "Will any Portugal player score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
 
     # CIV vs NOR
-    ("player_goal_involvement", "Will Erling Haaland (Norway) score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
+    ("player_goal", "Will Erling Haaland (Norway) score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
     ("team_more_than_opponent", "Will Ivory Coast have more corner kicks than Norway in regulation (90 minutes + stoppage time)?"),
     ("match_winner", "Will Norway win in regulation (90 minutes + stoppage time)?"),
     ("player_goal_involvement", "Will Martin Ødegaard (Norway) score or assist a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
@@ -159,7 +159,7 @@ CASES = [
     ("team_advance", "Will South Africa advance to the Round of 16?"),
     ("halftime_winning", "Will Canada be ahead at halftime?"),
     ("player_shot_on_target", "Will Iqraam Rayners have at least 1 shot on target in regulation (90 minutes + stoppage time)?"),
-    ("player_goal_involvement", "Will Cyle Larin score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
+    ("player_goal", "Will Cyle Larin score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
 
     # USA vs BIH
     ("goal_second_half_stoppage", "Will a goal be scored in second-half stoppage time?"),
@@ -167,7 +167,7 @@ CASES = [
     ("team_corners", "Will the United States have 6 or more corner kicks in regulation (90 minutes + stoppage time)?"),
     ("team_win_by_margin", "Will the United States win by 2 or more goals in regulation (90 minutes + stoppage time)?"),
     ("team_more_than_opponent", "Will Bosnia and Herzegovina receive more cards than the United States in regulation (90 minutes + stoppage time)?"),
-    ("player_goal_involvement", "Will Folarin Balogun score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
+    ("player_goal", "Will Folarin Balogun score a goal (excluding own goals) in regulation (90 minutes + stoppage time)?"),
     ("card_first_half", "Will a card be shown in the first half?"),
     ("team_total_sot", "Will the United States have 6 or more shots on target in regulation (90 minutes + stoppage time)?"),
 ]

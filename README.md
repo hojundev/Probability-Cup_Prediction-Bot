@@ -6,6 +6,17 @@ The bot ingests live betting odds, player stats, and confirmed lineups, runs a b
 
 ---
 
+## Final Results (2026 World Cup)
+
+- **Final RBP: 2315.29** — a **+2.5 average RBP gap vs the crowd** per forecast, across **976 settled forecasts**
+- **188th of 4013** players worldwide (top ~5%)
+- **3rd** on the University leaderboard and **3rd** in Canada
+- Beat **77%** of all forecasters
+- **46%** contrarian win rate (beating the crowd when betting against it)
+- **+4%** confidence bias (slightly over-confident overall — room to tighten)
+
+---
+
 ## How It Works
 
 ```
@@ -135,7 +146,7 @@ competition-bot/
 
 A second bot aimed at **winning per-match leaderboard prizes** (top 1 of a single match's markets), not overall competition ranking. It runs as a separate entry under a second SportsPredict API key.
 
-It reuses the entire competition-bot pipeline (same model, same data, same client) and adds a **three-tier prediction strategy** on top, calibrated from 700+ settled markets:
+It reuses the entire competition-bot pipeline (same model, same data, same client) and adds a **three-tier prediction strategy** on top, calibrated from 800+ settled markets:
 
 1. **Binary (1/99)** — types where the model has been directionally correct with positive RBP vs crowd (match winners, totals, team score, corners, etc.)
 2. **Heavy extremize (k=2.5)** — genuine signal but less reliable direction (SOT, halftime, goal timing, etc.)
@@ -174,8 +185,8 @@ Note: the match-bot scheduler intentionally skips the lineup poll to avoid doubl
 ```
 match-bot/
 ├── extremize.py          # extremize(p, k) logit-stretch transform
-├── config.py             # EXTREMIZE_K, PERIPHERAL_SHRINK, EXTREMIZE_TYPES, TARGET_MATCH
-├── match_bot.py          # Wires competition-bot pipeline to second key + extremizer
+├── config.py             # BINARY_TYPES, HEAVY/LIGHT_EXTREMIZE_K, HEAVY_EXTREMIZE_TYPES, TARGET_MATCH
+├── match_bot.py          # Wires competition-bot pipeline to second key + three-tier dispatch
 ├── scheduler.py          # Full sweep every 2h (no lineup poll)
 ├── check_submissions.py  # CLI: inspect match-bot predictions for a match
 ├── requirements.txt      # Same as competition-bot + pytest + hypothesis
@@ -186,7 +197,7 @@ match-bot/
 
 ### match-bot Three-Tier Strategy
 
-The match-bot uses a **three-tier prediction strategy** based on calibration data from 700+ settled markets:
+The match-bot uses a **three-tier prediction strategy** based on calibration data from 800+ settled markets:
 
 **Tier 1 — Binary (submit 1 or 99):** types where the model has been directionally correct with positive RBP vs crowd. High-risk/high-reward — maximises gain/loss per market.
 
@@ -197,8 +208,14 @@ The match-bot uses a **three-tier prediction strategy** based on calibration dat
 | Tier | Types | k |
 |------|-------|---|
 | Binary | `match_winner`, `team_advance`, `total_goals`, `total_corners`, `btts`, `team_score`, `team_score_half`, `team_more_than_opponent`, `match_draw`, `team_win_by_margin`, `team_goals_over`, `team_clean_sheet`, `btts_and_total_goals` | 1 or 99 |
-| Heavy | `team_total_sot`, `total_sot`, `total_shots`, `halftime_winning`, `half_vs_half_goals`, `team_first_goal`, `team_corners`, `team_offsides`, `total_offsides`, `halftime_tied`, `penalty_shootout`, `total_goals_exact`, and other knockout types | 2.5 |
-| Light | `player_shot_on_target`, `player_goal_involvement`, base-rate markets, `unknown` | 1.5 |
+| Heavy | `team_total_sot`, `total_sot`, `total_shots`, `halftime_winning`, `half_vs_half_goals`, `team_first_goal`, `team_corners`, `team_offsides`, `total_offsides`, `halftime_tied`, `penalty_shootout`, `total_goals_exact`, `team_cards`, `both_teams_card`, `goalkeeper_saves`, `both_halves_same_goals`, `total_subs`, `team_score_both_halves` | 2.5 |
+| Light | `player_shot_on_target`, `player_goal_involvement`, base-rate markets, and any type without enough calibration data to promote (including the newer semifinal/final types) | 1.5 |
+
+**Two exceptions bypass the tiers entirely:**
+- `unknown` types and exact coin flips (model = 0.50) are submitted at **50** — no edge.
+- **`player_goal`** ("score a goal") is submitted at the model's calibrated probability — **not** binary and **not** extremized. Star scorers convert often enough that pushing away from 50 is poor risk/reward. (This is the pure goal market only; `player_goal_involvement` and `player_shot_on_target` are still Tier 3 light-extremized.)
+
+> Note: the newer types (`match_winner_incl_et`, `penalty_scored`, `first_goal_assisted`, `player_vs_player_sot`, `distinct_shooters`, `both_teams_sot`, `goal_each_half`, `goal_stoppage_time`) currently fall into Tier 3 by default since they have no calibration history. Notably the trophy market `match_winner_incl_et` is light-extremized rather than going binary like its sibling `match_winner`.
 
 ---
 
@@ -223,6 +240,7 @@ Knockout markets are phrased differently from the group stage, so the parser and
 - **New question types** — `btts`, `team_goals_over` (scores N+), `team_score_both_halves`, `team_clean_sheet`, `match_draw` (regulation ends level), `team_advance` (to next round), `team_win_by_margin`, `total_shots`, `total_corners`, `total_offsides`, `both_teams_card`, `red_card`, `card_first_half`, `card_late`, `sub_scores`, `sub_before_half`, `any_player_sot`, `any_player_brace`, and four goal-timing markets (`goal_before_hydration`, `goal_after_hydration`, `goal_first_half_stoppage`, `goal_second_half_stoppage`).
 - **Mis-route fixes** — player shot-on-target markets tagged `(Country)` (e.g. "Messi (Argentina)") now route to the player model instead of `team_total_sot`; "there be N total corners/offsides" route to whole-match totals; "win by 2+ goals" routes to a margin model; "both teams receive a card" routes to a joint model. A `team_total_sot` subject that matches neither side of the match is re-priced as a player.
 - **New question types (Round of 16+)** — `total_goals_exact` ("exactly N goals"), `penalty_shootout` (P(draw) × 0.5), `total_subs` (base-rate by threshold), `goalkeeper_saves` (opponent SOT-derived), `both_halves_same_goals` (bivariate Poisson equal-count probability). "Will the match go to extra time?" is routed to `match_draw`.
+- **New question types (semifinal / final)** — `player_goal` split out from `player_goal_involvement` so a pure "score a goal" question isn't inflated by the assist term (with a WC goal discount); `goal_stoppage_time` (combined first+second-half added time — previously mis-routed to the second-half-only fraction); `goal_each_half`; `both_teams_sot` (each team N+ SOT); `match_winner_incl_et` ("win the World Cup / final" = regulation win + ½ × draw, since a drawn final is decided by ET/penalties — plain `match_winner` stays regulation-only); `penalty_scored` (P(awarded) × P(converted)); `first_goal_assisted` (P(≥1 goal) × assist rate); `player_vs_player_sot`; `distinct_shooters`. The `halftime_winning` parser was also widened to accept bare verbs ("lead"/"leads"/"win"), which previously fell through to `unknown`.
 - **Calibrated base rates** for markets with no xG signal (red card, substitutions, goal-timing windows, etc.) live as tunable constants in `submit.py` and are deliberately *not* shrunk toward 50.
 
 Run `python3 dump_questions.py` against a live round to confirm zero questions fall through to `unknown`.
@@ -239,6 +257,8 @@ Group stage: `match_winner`, `team_score`, `team_score_half`, `team_first_goal`,
 
 Knockout adds: `btts`, `team_goals_over`, `team_score_both_halves`, `team_clean_sheet`, `match_draw`, `team_advance`, `team_win_by_margin`, `total_shots`, `total_corners`, `total_offsides`, `both_teams_card`, `red_card`, `card_first_half`, `card_late`, `sub_scores`, `sub_before_half`, `any_player_sot`, `any_player_brace`, `goal_before_hydration`, `goal_after_hydration`, `goal_first_half_stoppage`, `goal_second_half_stoppage`, `total_goals_exact`, `penalty_shootout`, `total_subs`, `goalkeeper_saves`, `both_halves_same_goals` (see [Knockout Rounds](#knockout-rounds-round-of-32))
 
+Semifinal / final adds: `player_goal` (pure "score a goal", split out from goal-involvement), `goal_stoppage_time` (combined first+second-half added time), `goal_each_half` (≥1 goal in each half), `both_teams_sot` (each team N+ SOT), `match_winner_incl_et` ("win the World Cup / final" — regulation win + ½ × draw for the ET/penalty path), `penalty_scored` (awarded × conversion), `first_goal_assisted`, `player_vs_player_sot`, `distinct_shooters` (N+ different players from one team take a shot). `halftime_winning` also now matches bare-verb phrasings ("will X lead at halftime?").
+
 ### Pipeline per market
 1. Parse question text → structured type + parameters
 2. Look up betting odds for the match (FIFA code resolution: `GHA` → `Ghana`)
@@ -249,18 +269,24 @@ Knockout adds: `btts`, `team_goals_over`, `team_score_both_halves`, `team_clean_
 7. Apply shrinkage toward 50 on peripheral markets (corners, cards, offsides, total corners/offsides, "more than opponent")
 8. Clamp to integer 1–99
 
-Team offsides additionally scale by attacking intent: `mu = AVG_OFFSIDES_PER_TEAM × (1 + OFFSIDE_XG_SCALE × (team_xg / AVG_TEAM_XG − 1))`, so high-xG sides are priced for more offside calls than low-xG sides. **Corner counts** scale the same way (`CORNER_XG_SCALE`), with separate calibrated means for team vs total (`AVG_CORNERS_PER_TEAM` 5.5, `AVG_TOTAL_CORNERS` 9.0 — group-stage results showed team corners under-predicted and total corners over-predicted). `team_corners` also keeps more of its deviation (`PERIPHERAL_SHRINK_OVERRIDES` 0.65 vs the default 0.35) since it was hugging 50 from below; `total_corners` keeps the heavier default shrink.
+Team offsides additionally scale by attacking intent: `mu = AVG_OFFSIDES_PER_TEAM × (1 + OFFSIDE_XG_SCALE × (team_xg / AVG_TEAM_XG − 1))`, so high-xG sides are priced for more offside calls than low-xG sides. **Corner counts** scale the same way (`CORNER_XG_SCALE`), with separate calibrated means for team vs total (`AVG_CORNERS_PER_TEAM` 5.0, `AVG_TOTAL_CORNERS` 9.0 — both reverted down after knockout recaps showed threshold corners over-predicted). `team_corners` keeps 0.50 of its deviation (`PERIPHERAL_SHRINK_OVERRIDES` vs the default 0.35); `total_corners` keeps the heavier default shrink.
 
 ### Player markets
-`player_shot_on_target` and `player_goal_involvement` use the player's **own per-90 rate**, adjusted **only** by how strong their team is expected to be in the match — there is no pull toward a generic crowd baseline:
+There are three distinct player market types, each priced from the player's **own per-90 rate**, adjusted **only** by how strong their team is expected to be in the match — no pull toward a generic crowd baseline:
 
 ```
-context     = clamp(team_xg / PLAYER_TEAM_XG_REF, FLOOR, CEIL)
+context     = clamp(team_xg / PLAYER_TEAM_XG_REF, FLOOR 0.20, CEIL 0.80)
 player_rate = own_per90_rate × context
 P(event)    = Poisson(player_rate)
 ```
 
-So an elite striker on a strong team stays high (Kane ~88) while a good shooter on an underdog side is scaled down proportionally — driven by the favorite/underdog gap, not an arbitrary baseline. With no stats but a known team, the rate is derived from team xG; with neither, a fixed prior is used. `PLAYER_TEAM_XG_REF` is the single conservatism knob (raise it to pull everyone down).
+- **`player_goal`** — "Will X **score a goal**?" (pure goal, no assist). Uses the goal path only and applies a WC discount (`PLAYER_GOAL_WC_FACTOR` 0.68): club goal rates over-state World Cup scoring, and calibration showed these markets over-predicting badly. Distinct from goal-involvement — a pure "score a goal" question must **not** fold in the assist probability.
+- **`player_goal_involvement`** — "Will X **score or assist**?" Goal path OR assist path. The assist path carries its own WC adjustment (`_player_xa_wc_factor`, scaling from 0.45 for non-creators up to 1.15 for elite playmakers).
+- **`player_shot_on_target`** — "Will X have N+ shots on target?" Player SoT/90 scaled by team context.
+
+The `context` multiplier is capped at `PLAYER_TEAM_XG_CEIL` (0.80) so strong-team stars aren't over-boosted, and floored at 0.20 so a star on a minnow isn't zeroed out. With no stats but a known team, the rate is derived from team xG; with neither, a fixed prior is used. `PLAYER_TEAM_XG_REF` (2.5) is the global conservatism knob (raise it to pull everyone down).
+
+Two player-comparison / joint markets also exist: **`player_vs_player_sot`** ("will X record more SOT than Y?" — `P(X > Y)` on two independent SoT Poissons) and **`both_teams_sot`** ("will each team record N+ SOT?" — `P(home ≥ N) × P(away ≥ N)`).
 
 ### Key tunable constants (`bot/submit.py`)
 
@@ -269,17 +295,22 @@ So an elite striker on a strong team stays high (Kane ~88) while a good shooter 
 | `MARKET_ALPHA` | `0.88` | Weight on sharp betting-market line vs model |
 | `PERIPHERAL_SHRINK` | `0.35` | Fraction of deviation from 50 kept on peripheral markets |
 | `FIRST_HALF_GOAL_SHARE` | `0.43` | Share of goals expected in the first half (WC 2026 actual) |
-| `SOT_PER_XG_BASE` | `3.6` | Base shots on target per expected goal (scales up for dominant teams via `SOT_PER_XG_SLOPE`) |
+| `SOT_PER_XG_BASE` | `3.8` | Base shots on target per expected goal (scales up for dominant teams via `SOT_PER_XG_SLOPE`) |
 | `SOT_PER_XG_SLOPE` | `0.45` | How strongly the SOT ratio rises with team dominance |
 | `AVG_CARDS_TOTAL` | `2.665` | Yellow + red cards per match (2026 WC actual: 2.54Y + 0.125R) |
 | `PENALTY_OR_RED_RATE` | `0.24` | P(penalty OR red card); calibrated from group-stage results |
 | `PENALTY_AWARDED_RATE` | `0.26` | P(≥1 penalty awarded in a match) |
+| `PENALTY_CONVERSION` | `0.75` | P(an awarded penalty is scored) — used by `penalty_scored` |
+| `GOAL_ASSISTED_RATE` | `0.70` | Share of goals credited with an assist — used by `first_goal_assisted` |
 | `ELO_BLEND_WEIGHT` | `0.15` | Weight on Elo-derived xG split vs market-derived xG |
 | `AVG_TEAM_XG` | `1.3` | League-average team xG; baseline for xG-adjusted offsides/corners |
 | `OFFSIDE_XG_SCALE` | `0.6` | How strongly team xG scales the offside rate |
 | `CORNER_XG_SCALE` | `0.5` | How strongly team xG scales corner counts |
-| `PLAYER_TEAM_XG_REF` | `2.3` | Team xG for ~full per-90 player rate realization; raise to pull all players down |
-| `PLAYER_XA_WC_FACTOR` | `0.55` | WC conservatism on xA path — club assist rates over-state WC likelihood |
+| `PLAYER_TEAM_XG_REF` | `2.5` | Team xG for ~full per-90 player rate realization; raise to pull all players down |
+| `PLAYER_TEAM_XG_CEIL` / `_FLOOR` | `0.80` / `0.20` | Clamp on the player team-context multiplier (cap strong-team stars / floor minnow stars) |
+| `PLAYER_GOAL_WC_FACTOR` | `0.68` | WC goal discount on the pure `player_goal` path (club goal rates over-state WC scoring) |
+| `PLAYER_XA_WC_LOW` / `_HIGH` | `0.45` / `1.15` | WC assist factor, scaling from non-creators up to elite playmakers (`_REF_RATE` 0.50) |
+| `PLAYER_GOAL_INVOLVEMENT_BASE` / `PLAYER_SOT_BASE` | `0.30` / `0.45` | No-information priors for goal-involvement / SOT |
 | `MAX_PLAYER_REQUESTS_PER_RUN` | `20` | Cap on live api-football player lookups (cache hits are free) |
 | `BENCH_PLAYER_FACTOR` | `0.30` | Multiplier applied to player market prob when benched/absent |
 | `LINEUP_WINDOW_MINUTES` | `90` | Pre-kickoff window during which lineup polling is active |
@@ -309,7 +340,7 @@ Knockout base-rate priors (deliberately not shrunk): `RED_CARD_RATE` (0.118, fro
 - All unit tests pass (`python3 -m pytest tests/`)
 - 50/50 group-stage matches resolve to betting odds (FIFA code + alias resolution)
 - ~100% of market questions parse to a real type — group stage, Round of 32, and Round of 16 all verified zero `unknown` via `dump_questions.py`
-- +617 RBP across 240 forecasts in Round of 32 (top 36% of users)
+- **Final: +2315.29 RBP across 976 settled forecasts — 188th of 4013 worldwide (top ~5%), 3rd University, 3rd Canada, beat 77% of forecasters** (+617 RBP / top 36% at the Round-of-32 checkpoint)
 - Elite calibration — prediction bands track actual hit rates from 1% through 99%
 - 881 predictions successfully PATCHed in a complete run (July 2026)
 - 429s auto-retry — run is self-healing end to end

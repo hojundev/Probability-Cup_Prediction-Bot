@@ -90,6 +90,11 @@ CORNER_XG_SCALE = 0.5         # how strongly xG modulates corner counts (attacki
 AVG_FOULS_PER_TEAM = 12.0
 PENALTY_AWARDED_RATE = 0.26    # P(>=1 penalty in a match)
 PENALTY_OR_RED_RATE = 0.24     # reverted from 0.20: 34 samples, actual ~29%, crowd consistently higher
+PENALTY_CONVERSION = 0.75      # P(an awarded penalty is scored) — WC in-play conversion ~75%
+GOAL_ASSISTED_RATE = 0.70      # share of goals that are credited with an assist
+# P(N+ distinct players from one team take a shot). Most matches see 6-9 distinct
+# shooters per side; a base-rate lookup by threshold.
+DISTINCT_SHOOTERS_RATES = {3: 0.94, 4: 0.88, 5: 0.76, 6: 0.58, 7: 0.38, 8: 0.22}
 
 TEAM_SHOTS_PER_GAME = 12.3     # 2026 WC actual average
 TEAM_SHOTS_ON_TARGET_PER_GAME = 4.5
@@ -144,6 +149,12 @@ MAX_PLAYER_REQUESTS_PER_RUN = 20
 # wildly wrong numbers like crediting a weak-team player with elite scoring.
 PLAYER_GOAL_INVOLVEMENT_BASE = 0.30   # P(goal or assist) for a generic featured player
 PLAYER_SOT_BASE = 0.45                # P(>=1 shot on target) for a generic featured player
+# WC goal rates run below club rates (tougher defenses, shared ball, cautious
+# knockouts). Applied ONLY to the pure "score a goal" market (player_goal), which
+# was previously over-priced by (a) borrowing the club goal rate undiscounted and
+# (b) incorrectly adding an assist term. Calibrated so the pure-goal aggregate
+# across cached players lands ~19% (well under the crowd's ~45% on star scorers).
+PLAYER_GOAL_WC_FACTOR = 0.68
 
 # --- Player market scaling --------------------------------------------------
 # A player's probability is their OWN per-90 rate (or a team-xG estimate when we
@@ -212,6 +223,7 @@ GOAL_FRAC_FIRST_HALF_AFTER_HYDRATION = 0.22  # ~22' to 45': between first break 
 GOAL_FRAC_BETWEEN_BREAKS = 0.57             # ~22' to ~67': middle portion of the match
 GOAL_FRAC_FIRST_HALF_STOPPAGE = 0.05     # first-half added time
 GOAL_FRAC_SECOND_HALF_STOPPAGE = 0.09    # second-half added time
+GOAL_FRAC_STOPPAGE_TIME = 0.14           # combined first- + second-half added time (0.05 + 0.09)
 # Fallback P(goal in window) when no odds/xG are available.
 GOAL_WINDOW_FALLBACK = {
     "before_hydration": 0.34,
@@ -220,6 +232,7 @@ GOAL_WINDOW_FALLBACK = {
     "between_breaks": 0.77,
     "first_half_stoppage": 0.10,
     "second_half_stoppage": 0.16,
+    "stoppage_time": 0.28,
 }
 
 # "First goal scored by a player OTHER THAN X and Y" — modelable as
@@ -500,6 +513,22 @@ def _player_sot_prob(player, threshold, half, match_name, xg_home, xg_away):
     return prob_over_under(player_xsot, threshold, "over")
 
 
+def _player_xsot(player, match_name, xg_home, xg_away):
+    """
+    Expected shots on target (Poisson mean) for a single player, full match.
+    Mirrors _player_sot_prob's mu derivation but returns the mean rather than a
+    threshold probability. Used by the player-vs-player SOT comparison.
+    """
+    context = _player_team_context(player, match_name, xg_home, xg_away)
+    stats = _real_player_stats(player)
+    if stats and stats.get("shots_on_target_per_90", 0.0) >= MIN_REAL_STAT:
+        return stats["shots_on_target_per_90"] * context
+    team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
+    if team_xg is None:
+        return None
+    return (team_xg * _sot_per_xg(team_xg)) / TEAM_AVG_PLAYERS_SHOOTING
+
+
 def _model_prob_for_market(market, odds_index):
     """Route a market to the right model and return a decimal probability (0-1)."""
     question = market.get("question", "")
@@ -536,6 +565,18 @@ def _model_prob_for_market(market, odds_index):
         if odds:
             is_home = team_is_home(match_name, team)
             return p_home_sp if is_home else p_away_sp
+        return DEFAULT_PROB
+
+    # ---------- Win the trophy (final): regulation win + ET/penalties ----------
+    # "Will <team> win the World Cup / the final?" Unlike match_winner (which is
+    # regulation only), a regulation draw is still resolved via extra time and
+    # penalties, so add half the draw probability.
+    if qtype == "match_winner_incl_et":
+        team = parsed.get("team", "")
+        if odds and p_draw_sp is not None:
+            is_home = team_is_home(match_name, team)
+            p_win = p_home_sp if is_home else p_away_sp
+            return min(0.99, p_win + 0.5 * p_draw_sp)
         return DEFAULT_PROB
 
     # ---------- Team scores (full match) ----------
@@ -641,12 +682,39 @@ def _model_prob_for_market(market, odds_index):
             return prob_at_least_one(mu_h) * prob_at_least_one(mu_a)
         return 0.45
 
+    # ---------- Each team records N+ shots on target (full match) ----------
+    # Joint market: P(home >= N SOT) * P(away >= N SOT), independent teams.
+    if qtype == "both_teams_sot":
+        n = parsed.get("threshold", 1)
+        direction = parsed.get("direction", "over")
+        if xg_home is not None:
+            mu_h = max(MIN_TEAM_SOT, xg_home * _sot_per_xg(xg_home))
+            mu_a = max(MIN_TEAM_SOT, xg_away * _sot_per_xg(xg_away))
+            return prob_over_under(mu_h, n, direction) * prob_over_under(mu_a, n, direction)
+        return 0.30
+
     # ---------- Player shot on target ----------
     if qtype == "player_shot_on_target":
         return _player_sot_prob(
             parsed.get("player", ""), parsed.get("threshold"),
             parsed.get("half"), match_name, xg_home, xg_away,
         )
+
+    # ---------- Player scores a goal (PURE goal, no assist) ----------
+    # "Will <player> score a goal?" — must NOT include the assist path. WC goal
+    # rates run below club rates, so discount by PLAYER_GOAL_WC_FACTOR.
+    if qtype == "player_goal":
+        player = parsed.get("player", "")
+        context = _player_team_context(player, match_name, xg_home, xg_away)
+        stats = _real_player_stats(player)
+        if stats and stats.get("shots_per_90", 0.0) >= MIN_REAL_STAT:
+            conv = max(MIN_CONVERSION_RATE, stats.get("conversion_rate", 0.0))
+            player_xg = stats["shots_per_90"] * conv * context * PLAYER_GOAL_WC_FACTOR
+            return prob_at_least_one(player_xg)
+        team_xg = _player_team_xg(player, match_name, xg_home, xg_away)
+        if team_xg is None:
+            return PLAYER_GOAL_INVOLVEMENT_BASE * PLAYER_GOAL_WC_FACTOR   # no information
+        return prob_at_least_one((team_xg / TEAM_AVG_GOAL_SCORERS) * PLAYER_GOAL_WC_FACTOR)
 
     # ---------- Player goal involvement (goal or assist) ----------
     if qtype == "player_goal_involvement":
@@ -937,12 +1005,14 @@ def _model_prob_for_market(market, odds_index):
     # ---------- Goal scored inside a specific time window ----------
     if qtype in ("goal_before_hydration", "goal_after_hydration",
                  "goal_first_half_stoppage", "goal_second_half_stoppage",
+                 "goal_stoppage_time",
                  "goal_first_half_after_hydration", "goal_between_breaks"):
         frac = {
             "goal_before_hydration": GOAL_FRAC_BEFORE_HYDRATION,
             "goal_after_hydration": GOAL_FRAC_AFTER_HYDRATION,
             "goal_first_half_stoppage": GOAL_FRAC_FIRST_HALF_STOPPAGE,
             "goal_second_half_stoppage": GOAL_FRAC_SECOND_HALF_STOPPAGE,
+            "goal_stoppage_time": GOAL_FRAC_STOPPAGE_TIME,
             "goal_first_half_after_hydration": GOAL_FRAC_FIRST_HALF_AFTER_HYDRATION,
             "goal_between_breaks": GOAL_FRAC_BETWEEN_BREAKS,
         }[qtype]
@@ -1031,6 +1101,16 @@ def _model_prob_for_market(market, odds_index):
         mu_second = AVG_CARDS_TOTAL * CARD_SECOND_HALF_SHARE
         return prob_at_least_one(mu_first) * prob_at_least_one(mu_second)
 
+    # ---------- At least one goal in each half ----------
+    # P(≥1 goal in first half) × P(≥1 goal in second half), independent halves.
+    # Goals analogue of card_each_half; uses the WC half-split shares.
+    if qtype == "goal_each_half":
+        if total_xg is not None:
+            mu_first = total_xg * FIRST_HALF_GOAL_SHARE
+            mu_second = total_xg * SECOND_HALF_GOAL_SHARE
+            return prob_at_least_one(mu_first) * prob_at_least_one(mu_second)
+        return 0.45  # fallback: both halves scoring is a coin-flip-ish event
+
     # ---------- Card shown in stoppage time (either half) ----------
     # Covers ~10 combined minutes of stoppage (5' + 5'). ~10% of cards fall in
     # stoppage time. P(≥1 card in combined stoppage).
@@ -1042,6 +1122,32 @@ def _model_prob_for_market(market, odds_index):
         return PENALTY_AWARDED_RATE
     if qtype == "penalty_or_red_card":
         return PENALTY_OR_RED_RATE
+    # P(a penalty is awarded AND scored) = P(awarded) * P(converted).
+    if qtype == "penalty_scored":
+        return PENALTY_AWARDED_RATE * PENALTY_CONVERSION
+
+    # ---------- First goal is credited with an assist ----------
+    # P(a goal is scored) * P(that goal has an assist). The P(>=1 goal) factor
+    # captures the "settles No if 0-0" rule.
+    if qtype == "first_goal_assisted":
+        if total_xg is not None:
+            return prob_at_least_one(total_xg) * GOAL_ASSISTED_RATE
+        return 0.55
+
+    # ---------- Player A records more shots on target than player B ----------
+    if qtype == "player_vs_player_sot":
+        mu_a = _player_xsot(parsed.get("player", ""), match_name, xg_home, xg_away)
+        mu_b = _player_xsot(parsed.get("opponent", ""), match_name, xg_home, xg_away)
+        if mu_a is not None and mu_b is not None:
+            return prob_x_greater_than_y(mu_a, mu_b)
+        return 0.50
+
+    # ---------- N+ distinct players from one team take a shot ----------
+    if qtype == "distinct_shooters":
+        thr = parsed.get("threshold", 5)
+        direction = parsed.get("direction", "over")
+        p_over = DISTINCT_SHOOTERS_RATES.get(thr, 0.90 if thr <= 3 else 0.12)
+        return p_over if direction == "over" else 1 - p_over
 
     # ---------- Unknown ----------
     return DEFAULT_PROB
@@ -1092,7 +1198,7 @@ def adjust_for_lineup(market, current_int_prob, starters):
     from data.fetch_lineups import player_is_starter
 
     parsed = parse_question(market.get("question", ""))
-    if parsed.get("type") not in ("player_shot_on_target", "player_goal_involvement"):
+    if parsed.get("type") not in ("player_shot_on_target", "player_goal_involvement", "player_goal"):
         return current_int_prob
     if not starters:
         return current_int_prob

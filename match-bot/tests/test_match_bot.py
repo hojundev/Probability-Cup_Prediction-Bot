@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import match_bot
 from match_bot import run_model_on_market
 from extremize import extremize
-from config import EXTREMIZE_K
+from config import BINARY_TYPES, HEAVY_EXTREMIZE_K, HEAVY_EXTREMIZE_TYPES, LIGHT_EXTREMIZE_K
 
 # Reuse the sample odds payload shape from the competition-bot tests.
 from bot.match_data import build_odds_index
@@ -61,27 +61,43 @@ def test_outputs_in_valid_range():
         assert 1 <= pred <= 99
 
 
-def test_match_winner_is_extremized():
-    # match_winner is in EXTREMIZE_TYPES, so the match-bot's prediction must be
-    # further from 50 than the competition-bot's raw market line.
+def test_match_winner_is_binary():
+    # match_winner is Tier 1 (BINARY_TYPES): the match-bot goes all-in to 1/99
+    # in the direction the model favours.
+    assert "match_winner" in BINARY_TYPES
     index = build_odds_index(SAMPLE_ODDS)
     from bot.submit import run_model_on_market as cb_run
 
     base = cb_run(_market("a", "Will Mexico win the match?"), index)
-    extreme = run_model_on_market(_market("a", "Will Mexico win the match?"), index)
-    assert abs(extreme - 50) > abs(base - 50)
-    # And it should match the extremize transform of the base decimal.
-    assert extreme == round(min(99, max(1, 100 * extremize(base / 100, EXTREMIZE_K))))
+    out = run_model_on_market(_market("a", "Will Mexico win the match?"), index)
+    assert out in (1, 99)
+    assert out == (99 if base > 50 else 1)
 
 
-def test_penalty_market_not_extremized():
-    # penalty_or_red_card is NOT in EXTREMIZE_TYPES: hardcoded base rate, the
-    # match-bot must leave it identical to the competition-bot.
+def test_tier3_is_light_extremized():
+    # penalty_or_red_card is in neither tier 1 nor tier 2 -> Tier 3 (light logit
+    # stretch). Its raw base rate (0.24) is pushed further from 50.
+    assert "penalty_or_red_card" not in BINARY_TYPES
+    assert "penalty_or_red_card" not in HEAVY_EXTREMIZE_TYPES
     index = build_odds_index(SAMPLE_ODDS)
     from bot.submit import run_model_on_market as cb_run
 
     q = "Will a penalty kick be awarded OR a red card be shown?"
-    assert run_model_on_market(_market("p", q), index) == cb_run(_market("p", q), index)
+    base = cb_run(_market("p", q), index)     # 24, unshrunk base rate
+    out = run_model_on_market(_market("p", q), index)
+    assert out == round(min(99, max(1, 100 * extremize(base / 100, LIGHT_EXTREMIZE_K))))
+    assert abs(out - 50) > abs(base - 50)
+
+
+def test_player_goal_is_conservative():
+    # Pure "score a goal" (player_goal) bypasses the tiers: submitted at the
+    # model's calibrated probability, neither binary nor extremized.
+    index = build_odds_index(SAMPLE_ODDS)
+    from bot.submit import run_model_on_market as cb_run
+
+    q = "Will Some Unknownplayer score a goal (excluding own goals)?"
+    out = run_model_on_market(_market("g", q), index)
+    assert out == cb_run(_market("g", q), index)
 
 
 def test_peripheral_shrink_removed():
