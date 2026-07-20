@@ -8,12 +8,34 @@ The bot ingests live betting odds, player stats, and confirmed lineups, runs a b
 
 ## Final Results (2026 World Cup)
 
+Two bots ran on the platform: **Jun UW** (the competition-bot, playing for overall calibration) and **YOLO** (the match-bot, hunting per-match leaderboard wins).
+
+**Jun UW** — overall competition:
+
 - **Final RBP: 2315.29** — a **+2.5 average RBP gap vs the crowd** per forecast, across **976 settled forecasts**
 - **188th of 4013** players worldwide (top ~5%)
 - **3rd** on the University leaderboard and **3rd** in Canada
 - Beat **77%** of all forecasters
 - **46%** contrarian win rate (beating the crowd when betting against it)
 - **+4%** confidence bias (slightly over-confident overall — room to tighten)
+
+### Calibration
+
+Predicted probability tracks the actual hit rate across the full 1–99 range:
+
+<p align="center">
+  <img src="assets/calibration.png" alt="Calibration curve — predicted probability vs actual hit rate" width="70%" />
+</p>
+
+### Highlights
+
+**YOLO** (match-bot) took **1st place globally** on two per-match leaderboards:
+
+<p align="center">
+  <img src="assets/match-1st-global-1.png" alt="1st place globally — per-match leaderboard 1" width="45%" />
+  &nbsp;&nbsp;
+  <img src="assets/match-1st-global-2.png" alt="1st place globally — per-match leaderboard 2" width="45%" />
+</p>
 
 ---
 
@@ -142,9 +164,9 @@ competition-bot/
 
 ---
 
-## match-bot (Per-Match Prize Bot)
+## match-bot (Per-Match Prize Bot) — "YOLO"
 
-A second bot aimed at **winning per-match leaderboard prizes** (top 1 of a single match's markets), not overall competition ranking. It runs as a separate entry under a second SportsPredict API key.
+A second bot (registered as **YOLO**) aimed at **winning per-match leaderboard prizes** (top 1 of a single match's markets), not overall competition ranking. It runs as a separate entry under a second SportsPredict API key. The competition-bot runs as **Jun UW**.
 
 It reuses the entire competition-bot pipeline (same model, same data, same client) and adds a **three-tier prediction strategy** on top, calibrated from 800+ settled markets:
 
